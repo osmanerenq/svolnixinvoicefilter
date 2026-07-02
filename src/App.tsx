@@ -3,7 +3,7 @@ import { useStore } from './store';
 import FileDrop from './FileDrop';
 import FilterPanel from './FilterPanel';
 import InvoiceGrid from './InvoiceGrid';
-import { Key, Settings, Trash2, Cpu, Brain, X, Info } from 'lucide-react';
+import { Key, Settings, Trash2, Brain, X, Info } from 'lucide-react';
 
 export default function App() {
   const { apiKey, setApiKey, clearAll, invoices, model1, model2, setModels, loadModels, initListeners, modelLoading, modelLoadingMessage, syncCacheToMemory } = useStore();
