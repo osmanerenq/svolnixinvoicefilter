@@ -3,7 +3,8 @@ pub mod parser;
 mod filter;
 mod ai;
 mod folder;
-mod embedding;
+pub mod embedding;
+pub mod memory;
 
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -27,7 +28,7 @@ struct AppState {
     models_dir: Mutex<String>,
 }
 
-fn get_app_dir() -> PathBuf {
+pub fn get_app_dir() -> PathBuf {
     let mut path = if let Ok(profile) = std::env::var("USERPROFILE") {
         PathBuf::from(profile)
     } else if let Ok(home) = std::env::var("HOME") {
@@ -171,10 +172,10 @@ fn download_model_files(models_dir: &std::path::Path) -> Result<(), String> {
     let _ = std::fs::remove_file(models_dir.join("tokenizer.json"));
 
     let api = Api::new().map_err(|e| format!("HF API: {}", e))?;
-    // all-MiniLM-L6-v2 quantized: ~22MB, hızlı yükleme, fatura kategorileri için yeterli
-    let repo = api.model("Xenova/all-MiniLM-L6-v2".into());
+    // paraphrase-multilingual-MiniLM-L12-v2: ~118MB quantized. Türkçe dahil 50+ dili çok iyi anlar.
+    let repo = api.model("Xenova/paraphrase-multilingual-MiniLM-L12-v2".into());
 
-    log::info!("Model indiriliyor: Xenova/all-MiniLM-L6-v2 (~22MB)...");
+    log::info!("Model indiriliyor: Xenova/paraphrase-multilingual-MiniLM-L12-v2 (~118MB)...");
     let model_src = repo.get("onnx/model_quantized.onnx")
         .map_err(|e| format!("Model indirme: {}", e))?;
     log::info!("Tokenizer indiriliyor...");
@@ -684,7 +685,7 @@ async fn ai_filter(
             if let Some(ref emb) = inv.embedding {
                 indexed.push((emb.clone(), i, inv.id.clone()));
             } else {
-                let text = format!("{} {} {}", inv.issuer, inv.recipient, inv.description);
+                let text = format!("{} {} {} {}", inv.issuer, inv.recipient, inv.category, inv.description);
                 if let Ok(emb) = engine.embed(text.trim()) {
                     indexed.push((emb, i, inv.id.clone()));
                 }
@@ -867,7 +868,30 @@ async fn fix_invoice_with_ai(state: tauri::State<'_, AppState>, id: String) -> R
         if let Some(existing) = invoices.iter_mut().find(|i| i.id == id) {
             existing.issuer = inv.issuer.clone();
             existing.recipient = inv.recipient.clone();
+
+            // Recalculate embedding since fields changed
+            if let Some(engine) = embedding::EmbeddingEngine::get() {
+                let text = format!("{} {} {} {}", existing.issuer, existing.recipient, existing.category, existing.description);
+                if let Ok(emb) = engine.embed(&text) {
+                    existing.embedding = Some(emb.clone());
+                    inv.embedding = Some(emb);
+                }
+            }
         }
+
+        // Update parse cache and save
+        let path_key = get_file_cache_key(&inv.full_path);
+        let mut cache = state.parse_cache.lock().unwrap();
+        if let Some(cache_invs) = cache.get_mut(&path_key) {
+            for ci in cache_invs {
+                if ci.filename == inv.filename {
+                    ci.issuer = inv.issuer.clone();
+                    ci.recipient = inv.recipient.clone();
+                    ci.embedding = inv.embedding.clone();
+                }
+            }
+        }
+        save_parse_cache(&cache);
         
         Ok(inv)
     } else {
@@ -879,6 +903,85 @@ async fn fix_invoice_with_ai(state: tauri::State<'_, AppState>, id: String) -> R
 fn clear_invoices(state: tauri::State<AppState>) {
     let mut invoices = state.invoices.lock().unwrap();
     invoices.clear();
+}
+
+#[tauri::command]
+fn update_invoice_category(
+    state: tauri::State<AppState>,
+    id: String,
+    new_category: String
+) -> Result<(), String> {
+    let mut invoices = state.invoices.lock().unwrap();
+    if let Some(inv) = invoices.iter_mut().find(|i| i.id == id) {
+        inv.category = new_category.clone();
+        
+        if let Some(engine) = embedding::EmbeddingEngine::get() {
+            let text = format!("{} {} {} {}", inv.issuer, inv.recipient, inv.category, inv.description);
+            if let Ok(emb) = engine.embed(&text) {
+                inv.embedding = Some(emb.clone());
+                crate::memory::add_trained_vector(new_category, emb);
+            }
+        } else if let Some(emb) = &inv.embedding {
+            crate::memory::add_trained_vector(new_category, emb.clone());
+        }
+
+        // Update parse cache and save
+        let path_key = get_file_cache_key(&inv.full_path);
+        let mut cache = state.parse_cache.lock().unwrap();
+        if let Some(cache_invs) = cache.get_mut(&path_key) {
+            for ci in cache_invs {
+                if ci.filename == inv.filename {
+                    ci.category = inv.category.clone();
+                    ci.embedding = inv.embedding.clone();
+                }
+            }
+        }
+        save_parse_cache(&cache);
+        
+        Ok(())
+    } else {
+        Err("Fatura bulunamadı.".into())
+    }
+}
+
+#[tauri::command]
+fn is_model_ready() -> bool {
+    embedding::EmbeddingEngine::get().is_some()
+}
+
+#[tauri::command]
+async fn sync_cache_to_memory(state: tauri::State<'_, AppState>) -> Result<usize, String> {
+    let cache = state.parse_cache.lock().unwrap().clone();
+    let engine = embedding::EmbeddingEngine::get().ok_or("Embedding motoru hazır değil.")?;
+    
+    let mut to_train = Vec::new();
+    for (_key, invs) in cache {
+        for inv in invs {
+            if !inv.category.is_empty() && inv.category != "Diğer" {
+                let emb = if let Some(e) = inv.embedding {
+                    e
+                } else {
+                    let text = format!("{} {} {} {}", inv.issuer, inv.recipient, inv.category, inv.description);
+                    match engine.embed(&text) {
+                        Ok(e) => e,
+                        Err(_) => continue,
+                    }
+                };
+                
+                to_train.push(crate::memory::TrainedVector {
+                    category: inv.category.clone(),
+                    embedding: emb,
+                });
+            }
+        }
+    }
+    
+    let count = to_train.len();
+    if count > 0 {
+        crate::memory::add_trained_vectors_bulk(to_train);
+    }
+    
+    Ok(count)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -908,6 +1011,9 @@ pub fn run() {
                 models_dir: Mutex::new(get_app_dir().join("models").to_string_lossy().to_string()),
             });
 
+            // Initialize memory
+            memory::load_trained_memory();
+
             // ort::init() ana thread'de çağrılmalı — Windows loader lock nedeniyle
             // arka thread'den çağrılırsa UI bloklanıyor
             if ort::init().commit() {
@@ -916,33 +1022,40 @@ pub fn run() {
                 log::error!("ONNX Runtime yuklenemedi");
             }
 
+            let app_handle = app.handle().clone();
+            
             // Sadece ağır model yüklemesi arka thread'de
-            std::thread::spawn(|| {
+            std::thread::spawn(move || {
                 let models_dir = get_app_dir().join("models");
-                    let _ = std::fs::create_dir_all(&models_dir);
-                    let model_path = models_dir.join("model.onnx");
-                    let tokenizer_path = models_dir.join("tokenizer.json");
+                let _ = std::fs::create_dir_all(&models_dir);
+                let model_path = models_dir.join("model.onnx");
+                let tokenizer_path = models_dir.join("tokenizer.json");
 
-                    // Auto-download model if missing
-                    if !model_path.exists() || !tokenizer_path.exists() {
-                        log::info!("Model dosyalari eksik, HuggingFace'ten indiriliyor...");
-                        match download_model_files(&models_dir) {
-                            Ok(()) => log::info!("Model dosyalari indirildi"),
-                            Err(e) => log::error!("Model indirme hatasi: {}", e),
-                        }
+                // Auto-download model if missing
+                if !model_path.exists() || !tokenizer_path.exists() {
+                    log::info!("Model dosyalari eksik, HuggingFace'ten indiriliyor...");
+                    let _ = app_handle.emit("model_loading_status", "Model indiriliyor: Xenova/paraphrase-multilingual-MiniLM-L12-v2 (~118MB)...");
+                    match download_model_files(&models_dir) {
+                        Ok(()) => log::info!("Model dosyalari indirildi"),
+                        Err(e) => log::error!("Model indirme hatasi: {}", e),
                     }
+                }
 
-                    if model_path.exists() && tokenizer_path.exists() {
-                        match embedding::EmbeddingEngine::init(
-                            &model_path.to_string_lossy(),
-                            &tokenizer_path.to_string_lossy(),
-                        ) {
-                            Ok(()) => log::info!("Embedding engine baslatildi"),
-                            Err(e) => log::error!("Embedding engine baslatilamadi: {}", e),
-                        }
-                    } else {
-                        log::warn!("Model dosyalari bulunamadi: {}", models_dir.display());
+                if model_path.exists() && tokenizer_path.exists() {
+                    let _ = app_handle.emit("model_loading_status", "Model yükleniyor (Belleğe alınıyor)...");
+                    match embedding::EmbeddingEngine::init(
+                        &model_path.to_string_lossy(),
+                        &tokenizer_path.to_string_lossy(),
+                    ) {
+                        Ok(()) => {
+                            log::info!("Embedding engine baslatildi");
+                            let _ = app_handle.emit("model_ready", ());
+                        },
+                        Err(e) => log::error!("Embedding engine baslatilamadi: {}", e),
                     }
+                } else {
+                    log::warn!("Model dosyalari bulunamadi: {}", models_dir.display());
+                }
             });
 
             Ok(())
@@ -964,6 +1077,9 @@ pub fn run() {
             ai_filter,
             ai_filter_and_group,
             clear_invoices,
+            update_invoice_category,
+            is_model_ready,
+            sync_cache_to_memory,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

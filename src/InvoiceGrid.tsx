@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useStore } from './store';
 import { Table, LayoutGrid, FileText, ChevronDown, ChevronUp, X, Trash2, Cpu } from 'lucide-react';
 import type { Invoice, GroupedInvoices } from './types';
@@ -81,11 +81,70 @@ export default function InvoiceGrid() {
   );
 }
 
+function CategoryInput({ value, onChange, className }: { value: string; onChange: (val: string) => void; className?: string }) {
+  const [localVal, setLocalVal] = useState(value);
+  
+  useEffect(() => {
+    setLocalVal(value);
+  }, [value]);
+
+  const commitChange = () => {
+    const trimmed = localVal.trim();
+    if (trimmed !== value.trim()) {
+      onChange(trimmed);
+    }
+  };
+
+  return (
+    <input
+      type="text"
+      list="category-options"
+      className={className}
+      value={localVal || ''}
+      onChange={(e) => setLocalVal(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') {
+          commitChange();
+          e.currentTarget.blur();
+        }
+      }}
+      onBlur={commitChange}
+      placeholder="Kategori"
+    />
+  );
+}
+
 function TableView({ invoices, onPreview, onDelete, onFix }: { invoices: Invoice[]; onPreview: (inv: Invoice) => void; onDelete: (id: string) => void; onFix: (id: string) => void }) {
+  const { updateInvoiceCategory } = useStore();
+
   if (invoices.length === 0) return <p className="text-gray-500 text-sm py-4 text-center">Sonuç bulunamadı</p>;
 
   return (
     <div className="overflow-x-auto rounded-lg border border-gray-800">
+      <datalist id="category-options">
+        <option value="Demirbaş" />
+        <option value="Hizmet" />
+        <option value="Yemek" />
+        <option value="Ulaşım" />
+        <option value="Konaklama" />
+        <option value="Market" />
+        <option value="Kırtasiye" />
+        <option value="Teknoloji" />
+        <option value="Kargo" />
+        <option value="Yazılım" />
+        <option value="Danışmanlık" />
+        <option value="Temizlik" />
+        <option value="Sarf Malzeme" />
+        <option value="Hırdavat" />
+        <option value="Mobilya" />
+        <option value="Sağlık" />
+        <option value="Güvenlik" />
+        <option value="Elektrik" />
+        <option value="Su" />
+        <option value="Doğalgaz" />
+        <option value="Akaryakıt" />
+        <option value="Diğer" />
+      </datalist>
       <table className="w-full text-sm">
         <thead>
           <tr className="bg-gray-900 text-gray-400 text-xs">
@@ -94,6 +153,7 @@ function TableView({ invoices, onPreview, onDelete, onFix }: { invoices: Invoice
             <th className="text-left px-3 py-2">Alıcı</th>
             <th className="text-right px-3 py-2">Tutar</th>
             <th className="text-left px-3 py-2">Tarih</th>
+            <th className="text-left px-3 py-2">Kategori</th>
             <th className="text-left px-3 py-2">Yer</th>
             <th className="w-16 px-2 py-2"></th>
           </tr>
@@ -112,13 +172,20 @@ function TableView({ invoices, onPreview, onDelete, onFix }: { invoices: Invoice
                 {inv.amount.toLocaleString('tr-TR', { minimumFractionDigits: 2 })} TL
               </td>
               <td className="px-3 py-2 text-gray-400">{inv.date || <span className="text-gray-600 italic">—</span>}</td>
-              <td className="px-3 py-2 text-gray-400">{inv.location || <span className="text-gray-600 italic">—</span>}</td>
+              <td className="px-3 py-2">
+                <CategoryInput
+                  className="bg-gray-900/50 border border-gray-700 text-blue-300 rounded px-2 py-1 text-xs w-28 focus:outline-none focus:border-blue-500"
+                  value={inv.category || ''}
+                  onChange={(val) => updateInvoiceCategory(inv.id, val)}
+                />
+              </td>
+              <td className="px-3 py-2 text-gray-400 max-w-[100px] truncate" title={inv.location}>{inv.location || <span className="text-gray-600 italic">—</span>}</td>
               <td className="px-2 py-2">
                 <div className="flex items-center gap-1.5 justify-end">
                   <button
                     onClick={() => onFix(inv.id)}
                     className="text-gray-500 hover:text-blue-400 transition-colors opacity-0 group-hover:opacity-100"
-                    title="AI ile Hatayı Düzelt ve Öğren"
+                    title="AI ile Düzelt"
                   >
                     <Cpu className="w-3.5 h-3.5" />
                   </button>
@@ -140,6 +207,8 @@ function TableView({ invoices, onPreview, onDelete, onFix }: { invoices: Invoice
 }
 
 function CardView({ invoices, onPreview, onDelete, onFix }: { invoices: Invoice[]; onPreview: (inv: Invoice) => void; onDelete: (id: string) => void; onFix: (id: string) => void }) {
+  const { updateInvoiceCategory } = useStore();
+
   if (invoices.length === 0) return <p className="text-gray-500 text-sm py-4 text-center">Sonuç bulunamadı</p>;
 
   return (
@@ -157,7 +226,7 @@ function CardView({ invoices, onPreview, onDelete, onFix }: { invoices: Invoice[
               <button
                 onClick={() => onFix(inv.id)}
                 className="text-gray-500 hover:text-blue-400 transition-colors"
-                title="AI ile Hatayı Düzelt ve Öğren"
+                title="AI ile Düzelt"
               >
                 <Cpu className="w-3.5 h-3.5" />
               </button>
@@ -170,14 +239,23 @@ function CardView({ invoices, onPreview, onDelete, onFix }: { invoices: Invoice[
               </button>
             </div>
           </div>
-          <div className="text-xs text-gray-500">
-            {inv.issuer && <span className="mr-2">{inv.issuer}</span>}
-            {inv.recipient && <span>→ {inv.recipient}</span>}
-            {!inv.issuer && !inv.recipient && <span className="italic text-gray-700">Düzenleyen/alıcı yok</span>}
+          <div className="flex flex-col gap-1">
+            <div className="text-xs text-gray-500">
+              {inv.issuer && <span className="mr-2">{inv.issuer}</span>}
+              {inv.recipient && <span>→ {inv.recipient}</span>}
+              {!inv.issuer && !inv.recipient && <span className="italic text-gray-700">Düzenleyen/alıcı yok</span>}
+            </div>
+             <div className="flex items-center gap-2 mt-1">
+                <CategoryInput
+                  className="bg-gray-800 border border-gray-700 text-blue-300 rounded px-2 py-1 text-xs flex-1 focus:outline-none focus:border-blue-500"
+                  value={inv.category || ''}
+                  onChange={(val) => updateInvoiceCategory(inv.id, val)}
+                />
+             </div>
           </div>
-          <div className="text-xs text-gray-600 flex justify-between">
+          <div className="text-xs text-gray-600 flex justify-between mt-2 pt-1 border-t border-gray-800">
             <span>{inv.date || '—'}</span>
-            <span>{inv.location || '—'}</span>
+            <span className="truncate max-w-[50%]" title={inv.location}>{inv.location || '—'}</span>
           </div>
         </div>
       ))}

@@ -10,8 +10,8 @@ pub async fn ask_deepseek(api_key: &str, request: &AiRequest) -> Result<AiRespon
         .iter()
         .map(|inv| {
             format!(
-                "{} | Düzenleyen:{} Alıcı:{} Tutar:{:.2}TL Tarih:{} Yer:{}",
-                inv.filename, inv.issuer, inv.recipient, inv.amount, inv.date, inv.location
+                "{} | Düzenleyen:{} Alıcı:{} Tutar:{:.2}TL Tarih:{} Yer:{} Kategori:{}",
+                inv.filename, inv.issuer, inv.recipient, inv.amount, inv.date, inv.location, inv.category
             )
         })
         .collect();

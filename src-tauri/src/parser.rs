@@ -632,6 +632,49 @@ pub(crate) fn validate_with_embedding(invoice: &mut Invoice) {
             invoice.location = better;
         }
     }
+
+    // Category (Memory + Zero-shot fallback)
+    if invoice.category.is_empty() {
+        let text_to_embed = format!("{} {}", invoice.issuer, invoice.description);
+        
+        if let Ok(text_emb) = engine.embed(&text_to_embed) {
+            invoice.embedding = Some(text_emb.clone()); // Vektörü kaydet
+            
+            // 1. Önce kullanıcının eğittiği KNN (Vektör Hafızası) belleğine bak.
+            // threshold = 0.82 (çok benzerse al)
+            if let Some(learned_cat) = crate::memory::find_best_match(&text_emb, 0.82) {
+                invoice.category = learned_cat;
+            } else {
+                // 2. Hafızada yoksa Zero-shot AI tahmini yap
+                let categories = [
+                    "Demirbaş", "Hizmet", "Yemek", "Ulaşım", "Konaklama", "Market", 
+                    "Kırtasiye", "Teknoloji", "Kargo", "Yazılım", "Danışmanlık", 
+                    "Temizlik", "Sarf Malzeme", "Hırdavat", "Mobilya", "Sağlık", 
+                    "Güvenlik", "Elektrik", "Su", "Doğalgaz", "Akaryakıt", "Diğer"
+                ];
+                let mut best_cat = "";
+                let mut best_cat_score = 0.0;
+
+                for cat in categories.iter() {
+                    if let Ok(cat_emb) = engine.embed(cat) {
+                        let sim = cosine_similarity(&text_emb, &cat_emb);
+                        if sim > best_cat_score {
+                            best_cat_score = sim;
+                            best_cat = cat;
+                        }
+                    }
+                }
+
+                if best_cat_score > 0.25 {
+                    invoice.category = best_cat.to_string();
+                } else {
+                    invoice.category = "Diğer".to_string();
+                }
+            }
+        } else {
+            invoice.category = "Diğer".to_string();
+        }
+    }
 }
 
 pub fn parse_excel(path: &str) -> Result<Vec<Invoice>, String> {

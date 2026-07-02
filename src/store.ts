@@ -22,8 +22,11 @@ interface AppStore {
   model2: string;
   loading: boolean;
   parseProgress: number;
+  modelLoading: boolean;
+  modelLoadingMessage: string;
   aiChat: { query: string; response: string; loading: boolean };
 
+  initListeners: () => Promise<void>;
   loadFiles: (paths: string[]) => Promise<void>;
   refreshOptions: () => Promise<void>;
   setCriteria: (partial: Partial<FilterCriteria>) => void;
@@ -34,11 +37,13 @@ interface AppStore {
   loadModels: () => Promise<void>;
   removeInvoice: (id: string) => Promise<void>;
   fixInvoiceWithAi: (id: string) => Promise<void>;
+  updateInvoiceCategory: (id: string, category: string) => Promise<void>;
+  syncCacheToMemory: () => Promise<number>;
   aiFilter: (query: string) => Promise<void>;
   aiFilterAndGroup: (query: string, model: string) => Promise<void>;
   organizeFolders: (groupBy: string, outputDir: string) => Promise<number>;
   organizeHierarchy: (parent: string, child: string, outputDir: string) => Promise<number>;
-  clearAll: () => void;
+  clearAll: () => Promise<void>;
   toggleIssuer: (issuer: string) => void;
   toggleRecipient: (r: string) => void;
   toggleLocation: (loc: string) => void;
@@ -75,7 +80,28 @@ export const useStore = create<AppStore>((set, get) => ({
   model2: 'deepseek-v4-pro',
   loading: false,
   parseProgress: 0,
+  modelLoading: true, // Start as true to block UI if model isn't ready
+  modelLoadingMessage: 'AI Motoru Başlatılıyor...',
   aiChat: { query: '', response: '', loading: false },
+
+  initListeners: async () => {
+    if (isTauri) {
+      const { listen } = await import('@tauri-apps/api/event');
+      await listen<string>('model_loading_status', (event) => {
+        set({ modelLoading: true, modelLoadingMessage: event.payload });
+      });
+      await listen<void>('model_ready', () => {
+        set({ modelLoading: false, modelLoadingMessage: '' });
+      });
+      // Check if it's already ready to avoid race conditions
+      const ready = await invoke<boolean>('is_model_ready').catch(() => false);
+      if (ready) {
+        set({ modelLoading: false, modelLoadingMessage: '' });
+      }
+    } else {
+      set({ modelLoading: false });
+    }
+  },
 
   loadFiles: async (paths) => {
     set({ loading: true, parseProgress: 0 });
@@ -168,6 +194,32 @@ export const useStore = create<AppStore>((set, get) => ({
     }
   },
 
+  updateInvoiceCategory: async (id, category) => {
+    try {
+      await invoke('update_invoice_category', { id, newCategory: category });
+      const filterOptions = await invoke<FilterOptions>('get_filter_options');
+      set((s) => ({
+        invoices: s.invoices.map((inv) => inv.id === id ? { ...inv, category } : inv),
+        filtered: s.filtered.map((inv) => inv.id === id ? { ...inv, category } : inv),
+        grouped: s.grouped.map(([k, v]) => [k, v.map((inv) => inv.id === id ? { ...inv, category } : inv)] as [string, Invoice[]]),
+        filterOptions,
+      }));
+    } catch (e) {
+      console.error("Kategori guncelleme hatasi", e);
+      throw e;
+    }
+  },
+
+  syncCacheToMemory: async () => {
+    try {
+      const count = await invoke<number>('sync_cache_to_memory');
+      return count;
+    } catch (e) {
+      console.error("Hafıza eşitleme hatası", e);
+      throw e;
+    }
+  },
+
   aiFilter: async (query) => {
     set((s) => ({ aiChat: { ...s.aiChat, query, loading: true } }));
     try {
@@ -205,19 +257,26 @@ export const useStore = create<AppStore>((set, get) => ({
     return invoke<number>('organize_hierarchy', { criteria, parentGroup: parent, childGroup: child, outputDir });
   },
 
-  clearAll: () => set({
-    invoices: [],
-    filterOptions: {
-      issuers: [], recipients: [], locations: [],
-      date_min: '', date_max: '', amount_min: 0, amount_max: 0, categories: [],
-    },
-    criteria: {
-      issuers: [], recipients: [], locations: [],
-      date_min: '', date_max: '', amount_min: 0, amount_max: 0, search_text: '', categories: [],
-    },
-    filtered: [],
-    grouped: [],
-  }),
+  clearAll: async () => {
+    try {
+      await invoke('clear_invoices');
+    } catch (e) {
+      console.error("Backend temizleme hatası:", e);
+    }
+    set({
+      invoices: [],
+      filterOptions: {
+        issuers: [], recipients: [], locations: [],
+        date_min: '', date_max: '', amount_min: 0, amount_max: 0, categories: [],
+      },
+      criteria: {
+        issuers: [], recipients: [], locations: [],
+        date_min: '', date_max: '', amount_min: 0, amount_max: 0, search_text: '', categories: [],
+      },
+      filtered: [],
+      grouped: [],
+    });
+  },
 
   toggleIssuer: (issuer) => {
     set((s) => {
