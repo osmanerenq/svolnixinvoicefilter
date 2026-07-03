@@ -1,6 +1,14 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderConfig {
+    pub name: String,
+    pub api_key: String,
+    #[serde(default)]
+    pub models: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Invoice {
     pub id: String,
     pub filename: String,
@@ -73,4 +81,11 @@ pub struct AiResponse {
 pub struct AiGroupedResponse {
     pub groups: Vec<(String, Vec<Invoice>)>,
     pub explanation: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeepAnalyzeResponse {
+    pub explanation: String,
+    /// AI'nın ilgili bulduğu fatura ID'leri — frontend bunları grid filtrelemesi için kullanır
+    pub matched_ids: Vec<String>,
 }

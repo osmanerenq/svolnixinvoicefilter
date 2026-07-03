@@ -1,24 +1,29 @@
 import { useState } from 'react';
 import { useStore } from './store';
-import { Filter, Search, Folders, ChevronDown, ChevronUp, SlidersHorizontal, MessageSquare, FolderOpen } from 'lucide-react';
+import { Filter, Search, Folders, ChevronDown, ChevronUp, SlidersHorizontal, MessageSquare, FolderOpen, Microscope } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
+import { PROVIDERS } from './types';
 
 export default function FilterPanel() {
   const {
     filterOptions, criteria, filtered, invoices,
     setCriteria, applyFilter, applyGroup, toggleIssuer, toggleRecipient, toggleLocation, toggleCategory,
-    organizeFolders, organizeHierarchy, aiFilterAndGroup, aiFilter, aiChat, model1, model2,
+    organizeFolders, organizeHierarchy, aiFilterAndGroup, aiFilter, aiChat, model1, model2, deepAnalyze, deepAnalysisChat,
+    availableModels, activeProvider, clearDeepAnalysisFilter,
   } = useStore();
 
   const [groupBy, setGroupBy] = useState('issuer');
   const [childGroup, setChildGroup] = useState('amount_range');
   const [outputDir, setOutputDir] = useState('');
   const [chatInput, setChatInput] = useState('');
-  const [aiModel, setAiModel] = useState(model1);
+  const [aiModel, setAiModel] = useState(availableModels[0] || model1);
   const [showChat, setShowChat] = useState(false);
   const [showFolder, setShowFolder] = useState(false);
   const [folderMsg, setFolderMsg] = useState('');
   const [isSmartFilter, setIsSmartFilter] = useState(false);
+  const [showDeepAnalyze, setShowDeepAnalyze] = useState(false);
+  const [deepQuery, setDeepQuery] = useState('');
+  const [deepModel, setDeepModel] = useState(availableModels[0] || model1);
 
   const activeFilters = [
     criteria.issuers.length > 0 && `Düzenleyen: ${criteria.issuers.length}`,
@@ -59,10 +64,13 @@ export default function FilterPanel() {
     } catch (e: any) { setFolderMsg(String(e)); }
   };
 
-  const clearFilters = () => setCriteria({
-    issuers: [], recipients: [], locations: [],
-    date_min: '', date_max: '', amount_min: 0, amount_max: 0, search_text: '', categories: [],
-  });
+  const clearFilters = () => {
+    setCriteria({
+      issuers: [], recipients: [], locations: [],
+      date_min: '', date_max: '', amount_min: 0, amount_max: 0, search_text: '', categories: [],
+    });
+    applyFilter();
+  };
 
   if (invoices.length === 0) return null;
 
@@ -189,6 +197,14 @@ export default function FilterPanel() {
           <MessageSquare className="w-4 h-4" /> AI Chat {showChat ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
         </button>
 
+        <button
+          onClick={() => setShowDeepAnalyze(!showDeepAnalyze)}
+          className="bg-purple-700 hover:bg-purple-600 text-white text-sm px-4 py-1.5 rounded-lg flex items-center gap-1.5"
+          title="300 faturaya kadar raw içerik analizi"
+        >
+          <Microscope className="w-4 h-4" /> Gelişmiş İnceleme {showDeepAnalyze ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+        </button>
+
         <span className="text-sm text-gray-500 ml-auto">
           {filtered.length}/{invoices.length} fatura
         </span>
@@ -245,7 +261,7 @@ export default function FilterPanel() {
         <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 space-y-3">
           <div className="flex items-center justify-between flex-wrap gap-2">
             <h3 className="text-sm font-medium text-amber-300 flex items-center gap-2">
-              <MessageSquare className="w-4 h-4" /> AI Filtreleme (DeepSeek)
+              <MessageSquare className="w-4 h-4" /> AI Filtreleme ({PROVIDERS.find(p => p.name === activeProvider)?.label || activeProvider})
             </h3>
             <div className="flex items-center gap-4">
               <label className="flex items-center gap-1.5 text-xs text-amber-200 cursor-pointer select-none">
@@ -263,8 +279,15 @@ export default function FilterPanel() {
                 className="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-xs text-amber-200"
                 title="AI Model Seç"
               >
-                <option value={model1}>{model1} (Hızlı)</option>
-                <option value={model2}>{model2} (Akıllı)</option>
+                {availableModels.length > 0
+                  ? availableModels.map((m) => (
+                      <option key={m} value={m}>{m}</option>
+                    ))
+                  : <>
+                      <option value={model1}>{model1} (Hızlı)</option>
+                      <option value={model2}>{model2} (Akıllı)</option>
+                    </>
+                }
               </select>
             </div>
           </div>
@@ -286,8 +309,109 @@ export default function FilterPanel() {
             </button>
           </div>
           {aiChat.response && (
-            <div className="text-sm text-amber-200 bg-amber-950/20 border border-amber-900/30 rounded-lg p-3 max-h-96 overflow-y-auto">
-              <MarkdownFormatter text={aiChat.response} />
+            <div className="space-y-2">
+              {filtered.length < invoices.length && (
+                <div className="flex items-center justify-between text-xs text-amber-300 bg-amber-950/30 border border-amber-900/40 rounded-lg px-3 py-1.5 animate-fade-in">
+                  <div className="flex items-center gap-2">
+                    <span>📋</span>
+                    <span>Grid <strong className="text-amber-200">{filtered.length}</strong> ilgili faturaya filtrelendi</span>
+                  </div>
+                  <button
+                    onClick={clearFilters}
+                    className="text-amber-400 hover:text-amber-200 font-semibold"
+                  >
+                    Filtreyi Kaldır
+                  </button>
+                </div>
+              )}
+              <div className="text-sm text-amber-200 bg-amber-950/20 border border-amber-900/30 rounded-lg p-3 max-h-96 overflow-y-auto">
+                <MarkdownFormatter text={aiChat.response} />
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Gelişmiş İnceleme panel */}
+      {showDeepAnalyze && (
+        <div className="bg-gray-900 border border-purple-800/50 rounded-lg p-4 space-y-3">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <h3 className="text-sm font-medium text-purple-300 flex items-center gap-2">
+              <Microscope className="w-4 h-4" /> Gelişmiş İnceleme
+              <span className="text-xs text-gray-500 font-normal">— raw fatura içeriği üzerinden serbest soru</span>
+            </h3>
+            <select
+              value={deepModel}
+              onChange={(e) => setDeepModel(e.target.value)}
+              className="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-xs text-purple-200"
+            >
+              {availableModels.length > 0
+                ? availableModels.map((m) => (
+                    <option key={m} value={m}>{m}</option>
+                  ))
+                : <>
+                    <option value={model1}>{model1} (Hızlı)</option>
+                    <option value={model2}>{model2} (Akıllı)</option>
+                  </>
+              }
+            </select>
+          </div>
+
+          {/* 300+ uyarı */}
+          {invoices.length > 300 && (
+            <div className="flex items-center gap-2 bg-orange-950/40 border border-orange-700/50 rounded-lg px-3 py-2 text-xs text-orange-300">
+              <span className="font-semibold">⚠</span>
+              {invoices.length} fatura yüklü — Bu özellik ilk 300 faturayı analiz eder.
+            </div>
+          )}
+
+          <div className="flex gap-2">
+            <input
+              type="text"
+              placeholder='Örn: "kaç tane bilgisayar alındı?", "demirbaş alımları hangi tedarikçilerden?", "en yüksek tutarlı 5 fatura"'
+              value={deepQuery}
+              onChange={(e) => setDeepQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && deepQuery.trim() && !deepAnalysisChat.loading) {
+                  deepAnalyze(deepQuery.trim(), deepModel);
+                }
+              }}
+              className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-gray-200 placeholder-gray-600"
+            />
+            <button
+              onClick={() => { if (deepQuery.trim()) deepAnalyze(deepQuery.trim(), deepModel); }}
+              disabled={deepAnalysisChat.loading || !deepQuery.trim()}
+              className="bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white text-sm px-4 py-1.5 rounded-lg whitespace-nowrap"
+            >
+              {deepAnalysisChat.loading ? 'Analiz ediliyor...' : 'Analiz Et'}
+            </button>
+          </div>
+
+          {deepAnalysisChat.loading && (
+            <div className="flex items-center gap-2 text-xs text-purple-400 animate-pulse">
+              <span>🔍</span> {Math.min(invoices.length, 300)} faturanın içeriği taranıyor...
+            </div>
+          )}
+
+          {deepAnalysisChat.response && !deepAnalysisChat.loading && (
+            <div className="space-y-2">
+              {deepAnalysisChat.matchedIds.length > 0 && (
+                <div className="flex items-center justify-between text-xs text-purple-300 bg-purple-950/30 border border-purple-800/40 rounded-lg px-3 py-1.5 animate-fade-in">
+                  <div className="flex items-center gap-2">
+                    <span>📋</span>
+                    <span>Grid <strong className="text-purple-200">{deepAnalysisChat.matchedIds.length}</strong> ilgili faturaya filtrelendi</span>
+                  </div>
+                  <button
+                    onClick={clearDeepAnalysisFilter}
+                    className="text-purple-400 hover:text-purple-200 font-semibold"
+                  >
+                    Filtreyi Kaldır
+                  </button>
+                </div>
+              )}
+              <div className="text-sm text-purple-100 bg-purple-950/20 border border-purple-900/30 rounded-lg p-3 max-h-96 overflow-y-auto">
+                <MarkdownFormatter text={deepAnalysisChat.response} />
+              </div>
             </div>
           )}
         </div>

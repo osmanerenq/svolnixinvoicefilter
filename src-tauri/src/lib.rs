@@ -20,7 +20,8 @@ use types::*;
 
 struct AppState {
     invoices: Mutex<Vec<Invoice>>,
-    api_key: Mutex<String>,
+    providers: Mutex<Vec<ProviderConfig>>,
+    active_provider: Mutex<String>,
     model1: Mutex<String>,  // user-configurable model 1 (fast)
     model2: Mutex<String>,  // user-configurable model 2 (smart)
     vkn_cache: Mutex<HashMap<String, String>>, // persistent VKN dictionary
@@ -125,9 +126,17 @@ fn save_vkn_cache(map: &HashMap<String, String>) {
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct AppConfig {
-    api_key: String,
+    api_key: String,  // ponytail: backward compat, read old configs
     model1: String,
     model2: String,
+    #[serde(default)]
+    providers: Vec<ProviderConfig>,
+    #[serde(default = "default_active_provider")]
+    active_provider: String,
+}
+
+fn default_active_provider() -> String {
+    "deepseek".into()
 }
 
 fn get_config_path() -> PathBuf {
@@ -138,26 +147,52 @@ fn get_config_path() -> PathBuf {
 
 fn load_config() -> AppConfig {
     let path = get_config_path();
-    if path.exists() {
-        if let Ok(mut file) = File::open(path) {
-            let mut content = String::new();
-            if file.read_to_string(&mut content).is_ok() {
-                if let Ok(cfg) = serde_json::from_str::<AppConfig>(&content) {
-                    return cfg;
-                }
-            }
-        }
-    }
-    AppConfig {
+    let default_cfg = AppConfig {
         api_key: String::new(),
         model1: "deepseek-v4-flash".to_string(),
         model2: "deepseek-v4-pro".to_string(),
+        providers: vec![],
+        active_provider: "deepseek".into(),
+    };
+
+    if !path.exists() {
+        return default_cfg;
     }
+
+    if let Ok(mut file) = File::open(&path) {
+        let mut content = String::new();
+        if file.read_to_string(&mut content).is_ok() {
+            if let Ok(mut cfg) = serde_json::from_str::<AppConfig>(&content) {
+                // Migration: convert old single api_key to providers vec
+                if cfg.providers.is_empty() && !cfg.api_key.is_empty() {
+                    cfg.providers.push(ProviderConfig {
+                        name: "deepseek".into(),
+                        api_key: cfg.api_key.clone(),
+                        models: vec![],
+                    });
+                    cfg.active_provider = "deepseek".into();
+                }
+                if cfg.active_provider.is_empty() {
+                    cfg.active_provider = "deepseek".into();
+                }
+                return cfg;
+            }
+        }
+    }
+    default_cfg
 }
 
-fn save_config(cfg: &AppConfig) {
+fn save_config(state: &AppState) {
     let path = get_config_path();
-    if let Ok(content) = serde_json::to_string_pretty(cfg) {
+    let providers = state.providers.lock().unwrap().clone();
+    let cfg = AppConfig {
+        api_key: String::new(),
+        model1: state.model1.lock().unwrap().clone(),
+        model2: state.model2.lock().unwrap().clone(),
+        providers,
+        active_provider: state.active_provider.lock().unwrap().clone(),
+    };
+    if let Ok(content) = serde_json::to_string_pretty(&cfg) {
         if let Ok(mut file) = File::create(path) {
             let _ = file.write_all(content.as_bytes());
         }
@@ -304,8 +339,9 @@ async fn load_files(
 
 
     // AI Fallback System for poor parse quality
-    let api_key = {
-        state.api_key.lock().unwrap().clone()
+    let provider = {
+        let active = state.active_provider.lock().unwrap().clone();
+        find_provider(&state, &active)
     };
     let model = {
         state.model1.lock().unwrap().clone()
@@ -350,12 +386,19 @@ async fn load_files(
                 || inv.issuer.to_uppercase().contains("TR10");
 
             if is_poor_parse {
-                if !api_key.is_empty() {
+                if let Some(ref provider_cfg) = provider {
+                    if provider_cfg.api_key.is_empty() { continue; }
+                    // response_format json_object only works on OpenAI-compatible
+                    let is_compat = matches!(provider_cfg.name.as_str(), "deepseek" | "openai" | "openrouter" | "nvidia");
+                    if !is_compat {
+                        log::warn!("AI Fallback atlandi ({} json_object desteklemez): {}", provider_cfg.name, inv.filename);
+                        continue;
+                    }
                     log::info!("AI Fallback kuyruğa ekleniyor (Eksik/Hatalı Parse): {}", inv.filename);
                     
                     let filename = inv.filename.clone();
                     let tax_number = inv.tax_number.clone();
-                    let api_key_clone = api_key.clone();
+                    let provider_cfg_clone = provider_cfg.clone();
                     let model_clone = model.clone();
                     let snippet = if inv.raw_text.len() > 2500 {
                         inv.raw_text[..2500].to_string()
@@ -373,25 +416,16 @@ async fn load_files(
 
                     ai_tasks.spawn(async move {
                         let _permit = ai_sem_clone.acquire().await.unwrap();
-                        let resp_res = reqwest::Client::new()
-                            .post("https://api.deepseek.com/v1/chat/completions")
-                            .header("Authorization", format!("Bearer {}", api_key_clone))
-                            .header("Content-Type", "application/json")
-                            .json(&serde_json::json!({
-                                "model": model_clone,
-                                "messages": [
-                                    {"role": "system", "content": "Sen bir JSON API'sisin. Sadece JSON döndür. Örn: {\"issuer\": \"...\", \"recipient\": \"...\"}"},
-                                    {"role": "user", "content": format!("Aşağıdaki faturadan Düzenleyen (satıcı/issuer) ve Alıcı (alıcı/recipient) resmi şirket adlarını bulup JSON olarak ver.\n\n\
-                                         Kurallar:\n\
-                                         1. Alıcı (recipient), faturada genellikle 'SAYIN', 'Sayın', 'Müşteri' veya 'Alıcı' ifadesinin hemen ardından gelen şirkettir.\n\
-                                         2. Düzenleyen (issuer), faturayı kesen satıcıdır. Kesinlikle 'SAYIN' ile başlayan şirketi Düzenleyen (issuer) olarak yazma, onu Alıcı (recipient) olarak yaz.\n\n\
-                                         Fatura Metni:\n{}", snippet)}
-                                ],
-                                "response_format": { "type": "json_object" },
-                                "temperature": 0.1,
-                            }))
-                            .send()
-                            .await;
+                        let sys = "Sen bir JSON API'sisin. Sadece JSON döndür. Örn: {\"issuer\": \"...\", \"recipient\": \"...\"}";
+                        let user = format!("Aşağıdaki faturadan Düzenleyen (satıcı/issuer) ve Alıcı (alıcı/recipient) resmi şirket adlarını bulup JSON olarak ver.\n\n\
+                             Kurallar:\n\
+                             1. Alıcı (recipient), faturada genellikle 'SAYIN', 'Sayın', 'Müşteri' veya 'Alıcı' ifadesinin hemen ardından gelen şirkettir.\n\
+                             2. Düzenleyen (issuer), faturayı kesen satıcıdır. Kesinlikle 'SAYIN' ile başlayan şirketi Düzenleyen (issuer) olarak yazma, onu Alıcı (recipient) olarak yaz.\n\n\
+                             Fatura Metni:\n{}", snippet);
+
+                        let content_res = ai::chat_completion_openai_compat(
+                            &provider_cfg_clone, &model_clone, sys, &user, true
+                        ).await;
 
                         // Emit progress for AI task finish
                         let current = processed_steps_clone.fetch_add(1, Ordering::SeqCst) + 1;
@@ -399,19 +433,15 @@ async fn load_files(
                         let pct = (current * 100) / total;
                         let _ = window_clone.emit("parse_progress", pct);
 
-                        if let Ok(resp) = resp_res {
-                            if let Ok(body) = resp.json::<serde_json::Value>().await {
-                                if let Some(content) = body["choices"][0]["message"]["content"].as_str() {
-                                    let clean = content.trim()
-                                        .trim_start_matches("```json")
-                                        .trim_end_matches("```")
-                                        .trim();
-                                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(clean) {
-                                        let ai_issuer = parsed["issuer"].as_str().unwrap_or_default().trim().to_string();
-                                        let ai_recipient = parsed["recipient"].as_str().unwrap_or_default().trim().to_string();
-                                        return Some((idx, filename, tax_number, ai_issuer, ai_recipient));
-                                    }
-                                }
+                        if let Ok(content) = content_res {
+                            let clean = content.trim()
+                                .trim_start_matches("```json")
+                                .trim_end_matches("```")
+                                .trim();
+                            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(clean) {
+                                let ai_issuer = parsed["issuer"].as_str().unwrap_or_default().trim().to_string();
+                                let ai_recipient = parsed["recipient"].as_str().unwrap_or_default().trim().to_string();
+                                return Some((idx, filename, tax_number, ai_issuer, ai_recipient));
                             }
                         }
                         None
@@ -628,28 +658,85 @@ fn organize_hierarchy(
     folder::organize_into_hierarchy(&groups, &output_dir, &child_group)
 }
 
+fn find_provider(state: &AppState, name: &str) -> Option<ProviderConfig> {
+    state.providers.lock().unwrap().iter()
+        .find(|p| p.name == name)
+        .cloned()
+}
+
 #[tauri::command]
-fn set_api_key(state: tauri::State<AppState>, key: String) {
-    let mut api_key = state.api_key.lock().unwrap();
-    *api_key = key.clone();
-    let cfg = AppConfig {
-        api_key: key,
-        model1: state.model1.lock().unwrap().clone(),
-        model2: state.model2.lock().unwrap().clone(),
-    };
-    save_config(&cfg);
+fn set_provider_config(state: tauri::State<AppState>, provider_name: String, api_key: String) {
+    {
+        let mut providers = state.providers.lock().unwrap();
+        if let Some(existing) = providers.iter_mut().find(|p| p.name == provider_name) {
+            existing.api_key = api_key;
+        } else {
+            providers.push(ProviderConfig {
+                name: provider_name.clone(),
+                api_key,
+                models: vec![],
+            });
+        }
+    } // providers lock serbest bırakıldı
+    if state.active_provider.lock().unwrap().is_empty() {
+        *state.active_provider.lock().unwrap() = provider_name;
+    }
+    save_config(&state);
+}
+
+#[tauri::command]
+fn delete_provider_config(state: tauri::State<AppState>, provider_name: String) {
+    {
+        let mut providers = state.providers.lock().unwrap();
+        providers.retain(|p| p.name != provider_name);
+        if state.active_provider.lock().unwrap().clone() == provider_name {
+            let new_active = providers.first().map(|p| p.name.clone()).unwrap_or_default();
+            *state.active_provider.lock().unwrap() = new_active;
+        }
+    } // providers lock serbest bırakıldı
+    save_config(&state);
+}
+
+#[tauri::command]
+fn get_provider_configs(state: tauri::State<AppState>) -> Vec<ProviderConfig> {
+    state.providers.lock().unwrap().clone()
+}
+
+#[tauri::command]
+async fn fetch_models_command(state: tauri::State<'_, AppState>, provider_name: String) -> Result<Vec<String>, String> {
+    let api_key = find_provider(&state, &provider_name)
+        .map(|p| p.api_key)
+        .unwrap_or_default();
+    if api_key.is_empty() {
+        return Err("Bu saglayici icin API anahtari ayarlanmamis.".into());
+    }
+    let models = ai::fetch_models(&provider_name, &api_key).await?;
+    {
+        let mut providers = state.providers.lock().unwrap();
+        if let Some(cfg) = providers.iter_mut().find(|p| p.name == provider_name) {
+            cfg.models = models.clone();
+        }
+    } // providers lock serbest bırakıldı
+    save_config(&state);
+    Ok(models)
+}
+
+#[tauri::command]
+fn set_active_provider(state: tauri::State<AppState>, provider_name: String) {
+    *state.active_provider.lock().unwrap() = provider_name.clone();
+    save_config(&state);
+}
+
+#[tauri::command]
+fn get_active_provider(state: tauri::State<AppState>) -> String {
+    state.active_provider.lock().unwrap().clone()
 }
 
 #[tauri::command]
 fn set_models(state: tauri::State<AppState>, model1: String, model2: String) {
     *state.model1.lock().unwrap() = model1.clone();
     *state.model2.lock().unwrap() = model2.clone();
-    let cfg = AppConfig {
-        api_key: state.api_key.lock().unwrap().clone(),
-        model1,
-        model2,
-    };
-    save_config(&cfg);
+    save_config(&state);
 }
 
 #[tauri::command]
@@ -662,7 +749,28 @@ fn get_models(state: tauri::State<AppState>) -> (String, String) {
 
 #[tauri::command]
 fn get_api_key(state: tauri::State<AppState>) -> String {
-    state.api_key.lock().unwrap().clone()
+    // ponytail: backward compat — returns active provider's key
+    let active = state.active_provider.lock().unwrap().clone();
+    find_provider(&state, &active)
+        .map(|p| p.api_key)
+        .unwrap_or_default()
+}
+
+// ponytail: backward compat shim for old set_api_key
+#[tauri::command]
+fn set_api_key(state: tauri::State<AppState>, key: String) {
+    let provider_name = state.active_provider.lock().unwrap().clone();
+    let mut providers = state.providers.lock().unwrap();
+    if let Some(existing) = providers.iter_mut().find(|p| p.name == provider_name) {
+        existing.api_key = key.clone();
+    } else {
+        providers.push(ProviderConfig {
+            name: provider_name.clone(),
+            api_key: key,
+            models: vec![],
+        });
+    }
+    save_config(&state);
 }
 
 #[tauri::command]
@@ -677,7 +785,10 @@ async fn ai_filter(
     query: String,
 ) -> Result<AiResponse, String> {
     let invoices = state.invoices.lock().unwrap().clone();
-    let api_key = state.api_key.lock().unwrap().clone();
+    let provider = {
+        let active = state.active_provider.lock().unwrap().clone();
+        find_provider(&state, &active)
+    };
 
     let filtered: Vec<Invoice> = if let Some(engine) = embedding::EmbeddingEngine::get() {
         let mut indexed: Vec<(Vec<f32>, usize, String)> = Vec::new();
@@ -729,23 +840,24 @@ async fn ai_filter(
         });
     }
 
-    if !api_key.is_empty() {
-        let model = state.model1.lock().unwrap().clone();
-        let top: Vec<_> = filtered.iter().take(20).cloned().collect();
-        let request = AiRequest { invoices: top, query, model };
-        ai::ask_deepseek(&api_key, &request).await
-    } else {
-        Ok(AiResponse {
-            filter_criteria: FilterCriteria {
-                issuers: vec![], recipients: vec![], locations: vec![],
-                date_min: String::new(), date_max: String::new(),
-                amount_min: 0.0, amount_max: 0.0,
-                search_text: query.clone(), categories: vec![],
-            },
-            group_by: "issuer".to_string(),
-            explanation: format!("{} fatura bulundu.", filtered.len()),
-        })
+    if let Some(provider_cfg) = provider {
+        if !provider_cfg.api_key.is_empty() {
+            let model = state.model1.lock().unwrap().clone();
+            let top: Vec<_> = filtered.iter().take(20).cloned().collect();
+            let request = AiRequest { invoices: top, query, model };
+            return ai::ask_ai(&provider_cfg, &request).await;
+        }
     }
+    Ok(AiResponse {
+        filter_criteria: FilterCriteria {
+            issuers: vec![], recipients: vec![], locations: vec![],
+            date_min: String::new(), date_max: String::new(),
+            amount_min: 0.0, amount_max: 0.0,
+            search_text: query.clone(), categories: vec![],
+        },
+        group_by: "issuer".to_string(),
+        explanation: format!("{} fatura bulundu.", filtered.len()),
+    })
 }
 
 #[tauri::command]
@@ -759,12 +871,14 @@ async fn ai_filter_and_group(
         state.invoices.lock().unwrap().clone()
     };
 
-    let api_key = {
-        state.api_key.lock().unwrap().clone()
+    let provider = {
+        let active = state.active_provider.lock().unwrap().clone();
+        find_provider(&state, &active)
+            .ok_or("Aktif saglayici ayarlanmamis.")?
     };
 
-    if api_key.is_empty() {
-        return Err("DeepSeek API anahtarı ayarlanmamış.".into());
+    if provider.api_key.is_empty() {
+        return Err(format!("{} API anahtari ayarlanmamis.", provider.name));
     }
 
     // If pre_filtered is empty (no criteria set or returned nothing), use all loaded invoices
@@ -776,7 +890,7 @@ async fn ai_filter_and_group(
     };
 
     let request = AiRequest { invoices: invoices_to_send.clone(), query, model };
-    let ai_resp = ai::ask_deepseek(&api_key, &request).await?;
+    let ai_resp = ai::ask_ai(&provider, &request).await?;
     let filtered = filter::filter_invoices(&invoices_to_send, &ai_resp.filter_criteria);
     let groups = filter::group_and_sort(&filtered, &ai_resp.group_by);
     
@@ -788,9 +902,19 @@ async fn ai_filter_and_group(
 
 #[tauri::command]
 async fn fix_invoice_with_ai(state: tauri::State<'_, AppState>, id: String) -> Result<Invoice, String> {
-    let api_key = state.api_key.lock().unwrap().clone();
-    if api_key.is_empty() {
-        return Err("DeepSeek API anahtarı ayarlanmamış.".into());
+    let provider = {
+        let active = state.active_provider.lock().unwrap().clone();
+        find_provider(&state, &active)
+            .ok_or("Aktif saglayici ayarlanmamis.")?
+    };
+
+    if provider.api_key.is_empty() {
+        return Err(format!("{} API anahtari ayarlanmamis.", provider.name));
+    }
+
+    let is_compat = matches!(provider.name.as_str(), "deepseek" | "openai" | "openrouter" | "nvidia");
+    if !is_compat {
+        return Err(format!("{} json_object desteklemez. AI duzeltme icin DeepSeek/OpenAI secin.", provider.name));
     }
     
     let invoice = {
@@ -806,29 +930,10 @@ async fn fix_invoice_with_ai(state: tauri::State<'_, AppState>, id: String) -> R
             inv.raw_text.clone()
         };
         
-        // Call AI parsing logic inline
-        let resp_res = reqwest::Client::new()
-            .post("https://api.deepseek.com/v1/chat/completions")
-            .header("Authorization", format!("Bearer {}", api_key))
-            .header("Content-Type", "application/json")
-            .json(&serde_json::json!({
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": "Sen bir JSON API'sisin. Sadece JSON döndür. Örn: {\"issuer\": \"...\", \"recipient\": \"...\"}"},
-                    {"role": "user", "content": format!("Aşağıdaki faturadan Düzenleyen (issuer) ve Alıcı (recipient) resmi şirket adlarını bulup JSON olarak ver:\n\n{}", snippet)}
-                ],
-                "response_format": { "type": "json_object" },
-                "temperature": 0.1,
-            }))
-            .send()
-            .await
-            .map_err(|e| format!("İstek hatası: {}", e))?;
+        let sys = "Sen bir JSON API'sisin. Sadece JSON döndür. Örn: {\"issuer\": \"...\", \"recipient\": \"...\"}";
+        let user = format!("Aşağıdaki faturadan Düzenleyen (issuer) ve Alıcı (recipient) resmi şirket adlarını bulup JSON olarak ver:\n\n{}", snippet);
 
-        let body = resp_res.json::<serde_json::Value>().await
-            .map_err(|e| format!("JSON okuma hatası: {}", e))?;
-
-        let content = body["choices"][0]["message"]["content"].as_str()
-            .ok_or_else(|| "Geçersiz AI yanıtı".to_string())?;
+        let content = ai::chat_completion_openai_compat(&provider, &model, sys, &user, true).await?;
 
         let clean = content.trim()
             .trim_start_matches("```json")
@@ -945,6 +1050,120 @@ fn update_invoice_category(
 }
 
 #[tauri::command]
+async fn deep_analyze(
+    state: tauri::State<'_, AppState>,
+    query: String,
+    model: String,
+) -> Result<DeepAnalyzeResponse, String> {
+    let provider = {
+        let active = state.active_provider.lock().unwrap().clone();
+        find_provider(&state, &active)
+            .ok_or("Aktif saglayici ayarlanmamis.")?
+    };
+
+    if provider.api_key.is_empty() {
+        return Err(format!("{} API anahtari ayarlanmamis.", provider.name));
+    }
+
+    // Max 300 fatura al
+    let invoices: Vec<Invoice> = {
+        let all = state.invoices.lock().unwrap();
+        all.iter().take(300).cloned().collect()
+    };
+
+    if invoices.is_empty() {
+        return Err("Hiç fatura yüklenmemiş.".into());
+    }
+
+    // Her fatura için snippet: meta + raw_text ilk 4000 karakter
+    let snippets: Vec<String> = invoices
+        .iter()
+        .enumerate()
+        .map(|(i, inv)| {
+            let raw_snippet = if inv.raw_text.len() > 4000 {
+                // ponytail: char-safe truncation — find last char boundary at or before 4000 bytes
+                let end = inv.raw_text.char_indices()
+                    .map(|(i, _)| i)
+                    .take_while(|&i| i <= 4000)
+                    .last()
+                    .unwrap_or(0);
+                &inv.raw_text[..end]
+            } else {
+                &inv.raw_text
+            };
+            format!(
+                "[{}] Dosya: {} | Düzenleyen: {} | Alıcı: {} | Tutar: {:.2} TL | Tarih: {} | Kategori: {}\n---\n{}\n",
+                i + 1,
+                inv.filename,
+                inv.issuer,
+                inv.recipient,
+                inv.amount,
+                inv.date,
+                inv.category,
+                raw_snippet
+            )
+        })
+        .collect();
+
+    let all_text = snippets.join("\n========\n");
+
+    let system_prompt = "Sen bir fatura analiz uzmanısın. Sana numaralandırılmış faturalar ve içerikleri verilecek. \
+        Kullanıcının sorusunu doğru ve eksiksiz yanıtla. \
+        ÖNEMLİ: Faturalardaki Kategori alanları otomatik atanmış olup doğruluk seviyeleri düşüktür ve güvenilir değildir. \
+        Kategorilere güvenmek yerine fatura içeriğindeki (raw_text) asıl ürün, hizmet ve açıklama metinlerine dayanarak karar ver. \
+        Ürün/hizmet adetleri, tutarlar, tedarikçiler gibi detayları fatura içeriğinden okuyarak hesapla. \
+        ÖNEMLİ: Eşleşen faturaları açıklama (explanation) metninde tek tek sıra halinde veya liste olarak yazarak kalabalık etme. Arayüz bu faturaları zaten otomatik olarak filtreleyip gösterecektir. Açıklama metninde sadece genel analiz, toplam adet/tutar bilgisi ve gerekiyorsa markdown tablosu olarak özet rapor sun. \
+        Yanıtını SADECE şu JSON formatında ver (başka hiçbir şey yazma, kod bloğu kullanma):\
+        {\"explanation\": \"Markdown formatında detaylı cevap\", \"matched_indices\": [1, 5, 12]}. \
+        matched_indices: soruyla ilgili fatura numaraları (köşeli parantez içinde, [1] den başlayan). \
+        Eğer soru tüm faturalarla ilgiliyse matched_indices boş liste döndür.";
+
+    let user_prompt = format!(
+        "Faturalar ({} adet):\n\n{}\n\nKullanıcı sorusu: {}",
+        invoices.len(),
+        all_text,
+        query
+    );
+
+    let content = match provider.name.as_str() {
+        "gemini" => ai::chat_completion_gemini(&provider.api_key, &model, system_prompt, &user_prompt).await?,
+        "claude" => ai::chat_completion_claude(&provider.api_key, &model, system_prompt, &user_prompt).await?,
+        _ => ai::chat_completion_openai_compat(&provider, &model, system_prompt, &user_prompt, false).await?,
+    };
+
+    // JSON bloğu varsa temizle
+    let clean = {
+        let t = content.trim();
+        if t.starts_with("```") {
+            let end = t.find('\n').unwrap_or(0);
+            let tail = t.rfind("```").unwrap_or(t.len());
+            t[end..tail].trim()
+        } else {
+            t
+        }
+    };
+
+    let parsed: serde_json::Value = serde_json::from_str(clean)
+        .map_err(|e| format!("AI yanıtı parse hatası: {} | Ham: {}", e, clean))?;
+
+    let explanation = parsed["explanation"].as_str().unwrap_or("").to_string();
+
+    // matched_indices → invoice ID'lerine dönüştür (1-based → 0-based)
+    let matched_ids: Vec<String> = parsed["matched_indices"]
+        .as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .filter_map(|v| v.as_u64())
+        .filter_map(|idx| {
+            let i = (idx as usize).saturating_sub(1);
+            invoices.get(i).map(|inv| inv.id.clone())
+        })
+        .collect();
+
+    Ok(DeepAnalyzeResponse { explanation, matched_ids })
+}
+
+#[tauri::command]
 fn is_model_ready() -> bool {
     embedding::EmbeddingEngine::get().is_some()
 }
@@ -1003,7 +1222,8 @@ pub fn run() {
 
             app.manage(AppState {
                 invoices: Mutex::new(Vec::new()),
-                api_key: Mutex::new(cfg.api_key),
+                providers: Mutex::new(cfg.providers),
+                active_provider: Mutex::new(cfg.active_provider),
                 model1: Mutex::new(cfg.model1),
                 model2: Mutex::new(cfg.model2),
                 vkn_cache: Mutex::new(load_vkn_cache()),
@@ -1069,6 +1289,12 @@ pub fn run() {
             organize_folders,
             organize_hierarchy,
             set_api_key,
+            set_provider_config,
+            delete_provider_config,
+            get_provider_configs,
+            fetch_models_command,
+            set_active_provider,
+            get_active_provider,
             set_models,
             get_models,
             get_api_key,
@@ -1080,6 +1306,7 @@ pub fn run() {
             update_invoice_category,
             is_model_ready,
             sync_cache_to_memory,
+            deep_analyze,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

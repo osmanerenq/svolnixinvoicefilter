@@ -2,11 +2,32 @@ import { useState, useEffect } from 'react';
 import { useStore } from './store';
 import { Table, LayoutGrid, FileText, ChevronDown, ChevronUp, X, Trash2, Cpu } from 'lucide-react';
 import type { Invoice, GroupedInvoices } from './types';
+import { convertFileSrc } from '@tauri-apps/api/core';
+
+const isTauri = typeof window !== 'undefined' && ('__TAURI__' in window || '__TAURI_INTERNALS__' in window);
 
 export default function InvoiceGrid() {
   const { filtered, grouped, invoices, removeInvoice, fixInvoiceWithAi } = useStore();
   const [view, setView] = useState<'table' | 'cards' | 'groups'>('table');
   const [preview, setPreview] = useState<Invoice | null>(null);
+  const [showRaw, setShowRaw] = useState(false);
+
+  useEffect(() => {
+    if (preview) {
+      setShowRaw(false);
+    }
+  }, [preview]);
+
+  const getPdfSrc = (path: string) => {
+    if (isTauri) {
+      try {
+        return convertFileSrc(path);
+      } catch (e) {
+        console.error(e);
+      }
+    }
+    return '';
+  };
 
   if (invoices.length === 0) return null;
 
@@ -69,10 +90,30 @@ export default function InvoiceGrid() {
               <div className="flex justify-between"><span className="text-gray-500">A\u00e7\u0131klama</span><span className="text-gray-200 text-right max-w-[60%] truncate">{preview.description || '\u2014'}</span></div>
               <div className="flex justify-between col-span-2"><span className="text-gray-500">Tam Yol</span><span className="text-gray-600 text-right text-xs truncate max-w-[80%]">{preview.full_path}</span></div>
             </div>
-            {/* Full raw text */}
-            <div className="flex-1 overflow-y-auto px-5 py-3">
-              <p className="text-xs text-gray-500 mb-2">Ham PDF Metni (tam):</p>
-              <pre className="text-xs text-gray-300 bg-gray-800 rounded p-3 whitespace-pre-wrap break-words">{preview.raw_text}</pre>
+            {/* PDF or Full raw text */}
+            <div className="flex-1 flex flex-col min-h-[450px] px-5 py-3">
+              <div className="flex items-center justify-between mb-2 select-none">
+                <span className="text-xs text-gray-500 font-semibold">
+                  {preview.filename.toLowerCase().endsWith('.pdf') ? "Orijinal Fatura PDF Belgesi" : "Ham Metin İçeriği"}
+                </span>
+                {preview.filename.toLowerCase().endsWith('.pdf') && (
+                  <button
+                    onClick={() => setShowRaw(!showRaw)}
+                    className="text-xs text-blue-400 hover:text-blue-300 font-semibold"
+                  >
+                    {showRaw ? "Orijinal PDF'i Göster" : "Ham Metni Göster"}
+                  </button>
+                )}
+              </div>
+              {showRaw || !preview.filename.toLowerCase().endsWith('.pdf') ? (
+                <pre className="text-xs text-gray-300 bg-gray-800 rounded-lg p-3 whitespace-pre-wrap break-words flex-1 overflow-y-auto max-h-[450px]">{preview.raw_text}</pre>
+              ) : (
+                <iframe
+                  src={getPdfSrc(preview.full_path)}
+                  className="w-full h-full min-h-[400px] border border-gray-800 rounded-lg bg-gray-950/50"
+                  title="Fatura PDF Önizleme"
+                />
+              )}
             </div>
           </div>
         </div>

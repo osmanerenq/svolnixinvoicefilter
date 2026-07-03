@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { Invoice, FilterOptions, FilterCriteria, GroupedInvoices, AiResponse, AiGroupedResponse } from './types';
+import type { Invoice, FilterOptions, FilterCriteria, GroupedInvoices, AiResponse, AiGroupedResponse, AiProviderConfig } from './types';
 
 const isTauri = typeof window !== 'undefined' && ('__TAURI__' in window || '__TAURI_INTERNALS__' in window);
 
@@ -25,6 +25,10 @@ interface AppStore {
   modelLoading: boolean;
   modelLoadingMessage: string;
   aiChat: { query: string; response: string; loading: boolean };
+  deepAnalysisChat: { query: string; response: string; loading: boolean; matchedIds: string[] };
+  providerConfigs: Record<string, AiProviderConfig>;
+  activeProvider: string;
+  availableModels: string[];
 
   initListeners: () => Promise<void>;
   loadFiles: (paths: string[]) => Promise<void>;
@@ -40,6 +44,8 @@ interface AppStore {
   updateInvoiceCategory: (id: string, category: string) => Promise<void>;
   syncCacheToMemory: () => Promise<number>;
   aiFilter: (query: string) => Promise<void>;
+  deepAnalyze: (query: string, model: string) => Promise<void>;
+  clearDeepAnalysisFilter: () => void;
   aiFilterAndGroup: (query: string, model: string) => Promise<void>;
   organizeFolders: (groupBy: string, outputDir: string) => Promise<number>;
   organizeHierarchy: (parent: string, child: string, outputDir: string) => Promise<number>;
@@ -48,6 +54,11 @@ interface AppStore {
   toggleRecipient: (r: string) => void;
   toggleLocation: (loc: string) => void;
   toggleCategory: (cat: string) => void;
+  setProviderConfig: (providerName: string, apiKey: string) => Promise<void>;
+  deleteProviderConfig: (providerName: string) => Promise<void>;
+  fetchModels: (providerName: string) => Promise<void>;
+  setActiveProvider: (providerName: string) => Promise<void>;
+  loadProviderConfigs: () => Promise<void>;
 }
 
 export const useStore = create<AppStore>((set, get) => ({
@@ -80,9 +91,13 @@ export const useStore = create<AppStore>((set, get) => ({
   model2: 'deepseek-v4-pro',
   loading: false,
   parseProgress: 0,
-  modelLoading: true, // Start as true to block UI if model isn't ready
+  modelLoading: true,
   modelLoadingMessage: 'AI Motoru Başlatılıyor...',
   aiChat: { query: '', response: '', loading: false },
+  deepAnalysisChat: { query: '', response: '', loading: false, matchedIds: [] },
+  providerConfigs: {},
+  activeProvider: 'deepseek',
+  availableModels: [],
 
   initListeners: async () => {
     if (isTauri) {
@@ -153,6 +168,66 @@ export const useStore = create<AppStore>((set, get) => ({
     set({ apiKey: key });
   },
 
+  setProviderConfig: async (providerName, apiKey) => {
+    await invoke('set_provider_config', { providerName, apiKey });
+    const configs = await invoke<AiProviderConfig[]>('get_provider_configs');
+    const cfgMap: Record<string, AiProviderConfig> = {};
+    for (const c of configs) cfgMap[c.name] = c;
+    set((s) => ({ providerConfigs: cfgMap, apiKey: cfgMap[s.activeProvider]?.api_key || '' }));
+  },
+
+  deleteProviderConfig: async (providerName) => {
+    await invoke('delete_provider_config', { providerName });
+    const configs = await invoke<AiProviderConfig[]>('get_provider_configs');
+    const active = await invoke<string>('get_active_provider');
+    const cfgMap: Record<string, AiProviderConfig> = {};
+    for (const c of configs) cfgMap[c.name] = c;
+    set({ providerConfigs: cfgMap, activeProvider: active, availableModels: cfgMap[active]?.models || [], apiKey: cfgMap[active]?.api_key || '' });
+  },
+
+  fetchModels: async (providerName) => {
+    const models = await invoke<string[]>('fetch_models_command', { providerName });
+    const configs = await invoke<AiProviderConfig[]>('get_provider_configs');
+    const cfgMap: Record<string, AiProviderConfig> = {};
+    for (const c of configs) cfgMap[c.name] = c;
+    // Her zaman availableModels güncelle — settings'te aktif olmayan provider da yapılandırılabilir
+    set({ providerConfigs: cfgMap, availableModels: models });
+  },
+
+  setActiveProvider: async (providerName) => {
+    await invoke('set_active_provider', { providerName });
+    const configs = await invoke<AiProviderConfig[]>('get_provider_configs');
+    const cfgMap: Record<string, AiProviderConfig> = {};
+    for (const c of configs) cfgMap[c.name] = c;
+    set({
+      activeProvider: providerName,
+      providerConfigs: cfgMap,
+      availableModels: cfgMap[providerName]?.models || [],
+      apiKey: cfgMap[providerName]?.api_key || '',
+    });
+    // Set default models for provider if empty
+    const state = get();
+    if (!state.model1 || state.model1 === 'deepseek-v4-flash') {
+      const defs = getDefaultModels(providerName);
+      await get().setModels(defs[0], defs[1]);
+    }
+  },
+
+  loadProviderConfigs: async () => {
+    try {
+      const configs = await invoke<AiProviderConfig[]>('get_provider_configs');
+      const active = await invoke<string>('get_active_provider');
+      const cfgMap: Record<string, AiProviderConfig> = {};
+      for (const c of configs) cfgMap[c.name] = c;
+      set({
+        providerConfigs: cfgMap,
+        activeProvider: active || 'deepseek',
+        availableModels: cfgMap[active]?.models || [],
+        apiKey: cfgMap[active]?.api_key || '',
+      });
+    } catch { /* browser dev mode */ }
+  },
+
   setModels: async (model1, model2) => {
     await invoke('set_models', { model1, model2 });
     set({ model1, model2 });
@@ -162,6 +237,18 @@ export const useStore = create<AppStore>((set, get) => ({
     const [model1, model2] = await invoke<[string, string]>('get_models');
     const apiKey = await invoke<string>('get_api_key');
     set({ model1, model2, apiKey });
+    // Also load provider configs
+    try {
+      const configs = await invoke<AiProviderConfig[]>('get_provider_configs');
+      const active = await invoke<string>('get_active_provider');
+      const cfgMap: Record<string, AiProviderConfig> = {};
+      for (const c of configs) cfgMap[c.name] = c;
+      set({
+        providerConfigs: cfgMap,
+        activeProvider: active || 'deepseek',
+        availableModels: cfgMap[active || 'deepseek']?.models || [],
+      });
+    } catch { /* browser */ }
   },
 
   removeInvoice: async (id) => {
@@ -236,12 +323,40 @@ export const useStore = create<AppStore>((set, get) => ({
     }
   },
 
+  deepAnalyze: async (query, model) => {
+    set((s) => ({ deepAnalysisChat: { ...s.deepAnalysisChat, query, loading: true } }));
+    try {
+      const resp = await invoke<{ explanation: string; matched_ids: string[] }>('deep_analyze', { query, model });
+      set((s) => ({
+        deepAnalysisChat: { query, response: resp.explanation, loading: false, matchedIds: resp.matched_ids },
+        // matched_ids varsa gridi filtrele, yoksa olduğu gibi bırak
+        filtered: resp.matched_ids.length > 0
+          ? s.invoices.filter((inv) => resp.matched_ids.includes(inv.id))
+          : s.filtered,
+      }));
+    } catch (e: any) {
+      set((s) => ({ deepAnalysisChat: { ...s.deepAnalysisChat, response: String(e), loading: false } }));
+    }
+  },
+
+  clearDeepAnalysisFilter: () => {
+    set((s) => ({
+      deepAnalysisChat: { ...s.deepAnalysisChat, matchedIds: [] }
+    }));
+    get().applyFilter();
+  },
+
   aiFilterAndGroup: async (query, model) => {
     set((s) => ({ aiChat: { ...s.aiChat, query, loading: true } }));
     try {
       const { criteria } = get();
       const resp = await invoke<AiGroupedResponse>('ai_filter_and_group', { query, criteria, model });
-      set({ grouped: resp.groups, aiChat: { query, response: resp.explanation, loading: false } });
+      const flatFiltered = resp.groups.flatMap((g) => g[1]);
+      set({
+        grouped: resp.groups,
+        filtered: flatFiltered,
+        aiChat: { query, response: resp.explanation, loading: false }
+      });
     } catch (e: any) {
       set((s) => ({ aiChat: { ...s.aiChat, response: String(e), loading: false } }));
     }
@@ -314,3 +429,15 @@ export const useStore = create<AppStore>((set, get) => ({
     });
   },
 }));
+
+function getDefaultModels(provider: string): [string, string] {
+  switch (provider) {
+    case 'deepseek': return ['deepseek-v4-flash', 'deepseek-v4-pro'];
+    case 'openai': return ['gpt-4o-mini', 'gpt-4o'];
+    case 'openrouter': return ['openai/gpt-4o-mini', 'anthropic/claude-3.5-sonnet'];
+    case 'nvidia': return ['meta/llama-3.1-8b-instruct', 'meta/llama-3.1-70b-instruct'];
+    case 'gemini': return ['gemini-2.0-flash', 'gemini-2.0-pro-exp-02-05'];
+    case 'claude': return ['claude-3-5-haiku-20241022', 'claude-3-5-sonnet-20241022'];
+    default: return ['deepseek-v4-flash', 'deepseek-v4-pro'];
+  }
+}

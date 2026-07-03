@@ -7,6 +7,23 @@ export default function FileDrop() {
   const { loadFiles, invoices, loading, parseProgress } = useStore();
   const [error, setError] = useState('');
   const [isDragActive, setIsDragActive] = useState(false);
+  const [isDismissed, setIsDismissed] = useState(() => {
+    try {
+      return localStorage.getItem('categoryWarningDismissed') === 'true';
+    } catch {
+      return false;
+    }
+  });
+
+  const handleDismiss = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setIsDismissed(true);
+    try {
+      localStorage.setItem('categoryWarningDismissed', 'true');
+    } catch (err) {
+      console.warn(err);
+    }
+  };
 
   const handleClick = async () => {
     setError('');
@@ -43,6 +60,20 @@ export default function FileDrop() {
 
   return (
     <div className="space-y-2">
+      {!isDismissed && (
+        <div className="flex items-center justify-between gap-2 bg-amber-955/20 border border-amber-900/30 rounded-lg px-4 py-2.5 text-xs text-amber-200/90 shadow-sm leading-relaxed">
+          <div className="flex items-center gap-2">
+            <span className="text-amber-400 font-semibold flex-shrink-0">⚠️ Not:</span>
+            <span>Kategoriler %100 güvenilir değildir. Hatalı olan kategorileri, aşağıdaki tablo veya kart görünümünden üzerine tıklayarak değiştirebilirsiniz.</span>
+          </div>
+          <button
+            onClick={handleDismiss}
+            className="text-xs bg-amber-600/80 hover:bg-amber-600 active:bg-amber-700 text-white font-semibold px-2.5 py-1 rounded-md shadow-sm transition-colors whitespace-nowrap"
+          >
+            Anladım
+          </button>
+        </div>
+      )}
       <div
         onClick={handleClick}
         onDrop={handleDrop}

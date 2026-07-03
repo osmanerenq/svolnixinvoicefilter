@@ -16,6 +16,21 @@ export interface Invoice {
   ai_parsed: boolean;
 }
 
+export interface AiProviderConfig {
+  name: string;
+  api_key: string;
+  models: string[];
+}
+
+export const PROVIDERS = [
+  { name: 'deepseek', label: 'DeepSeek' },
+  { name: 'openai', label: 'ChatGPT (OpenAI)' },
+  { name: 'openrouter', label: 'OpenRouter' },
+  { name: 'nvidia', label: 'NVIDIA NIM' },
+  { name: 'gemini', label: 'Gemini (Google)' },
+  { name: 'claude', label: 'Claude (Anthropic)' },
+] as const;
+
 export interface FilterOptions {
   issuers: string[];
   recipients: string[];
