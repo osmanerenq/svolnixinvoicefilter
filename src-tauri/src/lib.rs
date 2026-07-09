@@ -562,8 +562,12 @@ fn remove_invoice(state: tauri::State<AppState>, id: String) {
 async fn ai_filter(
     state: tauri::State<'_, AppState>,
     query: String,
+    filtered_ids: Vec<String>,
 ) -> Result<AiResponse, String> {
-    let invoices = state.invoices.lock().unwrap().clone();
+    let mut invoices = state.invoices.lock().unwrap().clone();
+    if !filtered_ids.is_empty() {
+        invoices.retain(|inv| filtered_ids.contains(&inv.id));
+    }
     let provider = {
         let active = state.active_provider.lock().unwrap().clone();
         find_provider(&state, &active)
@@ -619,12 +623,13 @@ async fn ai_filter(
 async fn ai_filter_and_group(
     state: tauri::State<'_, AppState>,
     query: String,
-    criteria: FilterCriteria,
+    filtered_ids: Vec<String>,
     model: String,
 ) -> Result<AiGroupedResponse, String> {
-    let all_invoices = {
-        state.invoices.lock().unwrap().clone()
-    };
+    let mut invoices_to_send = state.invoices.lock().unwrap().clone();
+    if !filtered_ids.is_empty() {
+        invoices_to_send.retain(|inv| filtered_ids.contains(&inv.id));
+    }
 
     let provider = {
         let active = state.active_provider.lock().unwrap().clone();
@@ -635,14 +640,6 @@ async fn ai_filter_and_group(
     if provider.api_key.is_empty() {
         return Err(format!("{} API anahtari ayarlanmamis.", provider.name));
     }
-
-    // If pre_filtered is empty (no criteria set or returned nothing), use all loaded invoices
-    let pre_filtered = filter::filter_invoices(&all_invoices, &criteria);
-    let invoices_to_send = if pre_filtered.is_empty() {
-        all_invoices.clone()
-    } else {
-        pre_filtered.clone()
-    };
 
     let request = AiRequest { invoices: invoices_to_send.clone(), query, model };
     let ai_resp = ai::ask_ai(&provider, &request).await?;
@@ -756,6 +753,7 @@ async fn deep_analyze(
     query: String,
     history: Vec<ChatMessage>,
     model: String,
+    filtered_ids: Vec<String>,
 ) -> Result<DeepAnalyzeResponse, String> {
     let provider = {
         let active = state.active_provider.lock().unwrap().clone();
@@ -767,23 +765,181 @@ async fn deep_analyze(
         return Err(format!("{} API anahtari ayarlanmamis.", provider.name));
     }
 
-    // Max 300 fatura al
+    // Filtrelenmiş faturaların tamamını al (Üst bilgiler hafif olduğundan sınır koymuyoruz)
     let invoices: Vec<Invoice> = {
         let all = state.invoices.lock().unwrap();
-        all.iter().take(300).cloned().collect()
+        all.iter()
+            .filter(|inv| filtered_ids.is_empty() || filtered_ids.contains(&inv.id))
+            .cloned()
+            .collect()
     };
 
     if invoices.is_empty() {
-        return Err("Hiç fatura yüklenmemiş.".into());
+        return Err("Hiç fatura yüklenmemiş veya eşleşen fatura bulunamadı.".into());
     }
 
-    // Her fatura için snippet: meta + raw_text ilk 4000 karakter
-    let snippets: Vec<String> = invoices
+    let mut conversation_text = String::new();
+    for msg in &history {
+        let role_label = match msg.role.to_lowercase().as_str() {
+            "user" => "Kullanıcı",
+            "assistant" => "Asistan",
+            _ => "Sistem",
+        };
+        conversation_text.push_str(&format!("{}: {}\n", role_label, msg.content));
+    }
+    conversation_text.push_str(&format!("Kullanıcı: {}\n", query));
+
+    // AŞAMA 1 (SORU SORMA / NETLEŞTİRME): Faturaların sadece üst bilgi özetlerini göndererek büyük token tasarrufu sağlıyoruz!
+    let metadata_summaries: Vec<String> = invoices
+        .iter()
+        .enumerate()
+        .map(|(i, inv)| {
+            format!(
+                "[{}] Dosya: {} | Düzenleyen: {} | Alıcı: {} | Tutar: {:.2} TL | Tarih: {}",
+                i + 1,
+                inv.filename,
+                inv.issuer,
+                inv.recipient,
+                inv.amount,
+                inv.date
+            )
+        })
+        .collect();
+    let metadata_text = metadata_summaries.join("\n");
+
+    let system_prompt = "Sen bir fatura analiz uzmanısın. Kullanıcı ile interaktif sohbet ederek faturaları analiz et ve gerekirse Excel dosyası oluştur. \
+        Kullanıcıyla konuşurken, eğer Excel oluşturma, özel raporlama veya filtreleme parametreleri tam net değilse (örn. hangi sütunlar olsun, satırları neye göre filtreleyelim, vb.), 'finalized' değerini false yap ve 'questions' listesinde kullanıcıya yönelteceğin en fazla 3 adet çoktan seçmeli soru oluştur. \
+        Çoktan seçmeli soruların seçenekleri net ve kısa olsun, ayrıca kullanıcının kendi cevabını yazabilmesi için 'allow_custom' değerini true yapabilirsin. \
+        Eğer kullanıcının talebi netleştiyse veya zaten en baştan beri net ise, 'finalized' değerini true yap, 'questions' alanını null/boş yap ve analizini tamamla. \
+        \
+        DETAYLI İÇERİK (RAW TEXT) ÇEKME MEKANİZMASI (ÇOK ÖNEMLİ): \
+        - Sana ilk aşamada faturaların detaylı içeriği (ürünler, kalemler vb.) gönderilmez, sadece dosya adı, düzenleyen, alıcı, tutar ve tarih gibi üst bilgileri gönderilir. \
+        - Kullanıcının sorusunu veya talebini yerine getirmek için faturaların detaylı içeriğine (ürün adları, kalem detayları, KDV oranları vb.) İHTİYACIN VARSA, JSON yanıtındaki 'needs_raw_text' alanını true VE 'finalized' alanını true yapmak ZORUNDASIN. \
+        - Bunu yaptığında sistem seni ikinci aşamada (Phase 2) otomatik olarak bu faturaların detaylı içerikleriyle birlikte tekrar çağıracaktır. \
+        - Kullanıcıdan detaylı metinleri elle yazıp göndermesini ASLA isteme. Sistem bunu otomatik yapacaktır. Tek yapman gereken 'finalized: true' ve 'needs_raw_text: true' yapmaktır. \
+        - Eğer detaylı ham metne (raw text) ihtiyacın yoksa (örn. sadece dosya adı, alıcı, düzenleyen, tutar, tarih gibi üst bilgilerle cevaplanabilecek sorular), 'finalized' değerini true ve 'needs_raw_text' değerini false yap. \
+        \
+        FİLTRELEME VE EŞLEŞTİRME KURALLARI: \
+        - Kullanıcının filtreleme isteklerinde Düzenleyen (Issuer) ve Alıcı (Recipient) alanlarını birbirinden kesin olarak ayırt et. \
+        - Örneğin: 'Alıcısı (veya alıcı faturalarında) ASC Enerji olanlar' dendiğinde, SADECE 'Alıcı' alanında ASC Enerji yazan faturaları eşleştir. Düzenleyeni (Issuer) ASC Enerji olup alıcısı Enerjisa olan faturaları kesinlikle eşleştirme! \
+        - Örneğin: 'Enerjisa faturaları' dendiğinde, alıcısı veya düzenleyeni Enerjisa olan faturaları eşleştir. \
+        - matched_indices listesine sadece ve sadece sorguyla birebir eşleşen faturaların 1-tabanlı indeks numaralarını (örn. [1, 3, 5]) ekle. Tüm faturaları körü körüne eşleştirme! \
+        - matched_indices listesine eklediğin fatura indekslerinin doğruluğundan emin ol. \
+        \
+        Yanıtını SADECE şu JSON formatında ver (başka hiçbir açıklama, kod bloğu veya markdown dışı karakter yazma):\
+        {\
+          \"explanation\": \"Markdown formatında sohbet mesajınız veya özet rapor\", \
+          \"matched_indices\": [1, 5, 12], \
+          \"excel_data\": { \
+            \"sheet_name\": \"Excel Sayfa Adı\", \
+            \"headers\": [\"Sütun1\", \"Sütun2\", ...], \
+            \"rows\": [[\"Satır1_Hücre1\", \"Satır1_Hücre2\", ...], [\"Satır2_Hücre1\", ...]] \
+          }, \
+          \"questions\": [ \
+            { \
+              \"id\": \"soru_id_1\", \
+              \"text\": \"Soru metni?\", \
+              \"options\": [\"Seçenek A\", \"Seçenek B\", \"Diğer (Farklı bir şey belirtin)\"], \
+              \"allow_custom\": true \
+            } \
+          ], \
+          \"needs_raw_text\": true, \
+          \"finalized\": false \
+        }";
+
+    let user_prompt_phase1 = format!(
+        "Faturalar Üst Bilgileri ({} adet):\n\n{}\n\nGeçmiş Sohbet:\n{}\nLütfen son kullanıcı sorusunu değerlendir ve yanıtı JSON formatında ver.",
+        invoices.len(),
+        metadata_text,
+        conversation_text
+    );
+
+    let content_phase1 = match provider.name.as_str() {
+        "gemini" => ai::chat_completion_gemini(&provider.api_key, &model, system_prompt, &user_prompt_phase1).await?,
+        "claude" => ai::chat_completion_claude(&provider.api_key, &model, system_prompt, &user_prompt_phase1).await?,
+        _ => ai::chat_completion_openai_compat(&provider, &model, system_prompt, &user_prompt_phase1, false).await?,
+    };
+
+    let clean_p1 = crate::ai::clean_json(&content_phase1);
+    let parsed_p1: serde_json::Value = serde_json::from_str(clean_p1)
+        .map_err(|e| format!("AI yanıtı parse hatası (Phase 1): {} | Ham: {}", e, clean_p1))?;
+
+    let questions: Option<Vec<MultipleChoiceQuestion>> = serde_json::from_value(parsed_p1["questions"].clone()).ok();
+    let mut is_finalized = parsed_p1["finalized"].as_bool().unwrap_or(false);
+    if let Some(ref q) = questions {
+        if !q.is_empty() {
+            is_finalized = false;
+        }
+    }
+    let needs_raw_text = parsed_p1["needs_raw_text"].as_bool().unwrap_or(true);
+
+    if !is_finalized || !needs_raw_text {
+        // AŞAMA 1 TAMAM: Soruları veya ara/nihai sohbet yanıtını doğrudan dön (raw metin gerekmiyor veya henüz kesinleşmedi)
+        let explanation = parsed_p1["explanation"].as_str().unwrap_or("").to_string();
+        
+        let excel_data: Option<ExcelData> = if parsed_p1.get("excel_data").is_some() && !parsed_p1["excel_data"].is_null() {
+            serde_json::from_value(parsed_p1["excel_data"].clone()).ok()
+        } else {
+            None
+        };
+
+        let matched_ids: Vec<String> = parsed_p1["matched_indices"]
+            .as_array()
+            .unwrap_or(&vec![])
+            .iter()
+            .filter_map(|v| v.as_u64())
+            .filter_map(|idx| {
+                let i = (idx as usize).saturating_sub(1);
+                invoices.get(i).map(|inv| inv.id.clone())
+            })
+            .collect();
+
+        let questions = questions.clone();
+        
+        return Ok(DeepAnalyzeResponse {
+            explanation,
+            matched_ids,
+            excel_data,
+            questions,
+            finalized: is_finalized,
+        });
+    }
+
+    // AŞAMA 2 (İŞLEM YAPILIYOR / KESİNLEŞTİ + RAW TEXT GEREKLİ):
+    // matched_indices belirlenmişse, sadece o faturaların raw_text'lerini yükle
+    let matched_indices: Vec<usize> = parsed_p1["matched_indices"]
+        .as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .filter_map(|v| v.as_u64())
+        .map(|idx| (idx as usize).saturating_sub(1))
+        .collect();
+
+    let target_invoices = if !matched_indices.is_empty() {
+        matched_indices.iter().filter_map(|&idx| invoices.get(idx)).cloned().collect::<Vec<Invoice>>()
+    } else {
+        invoices.clone()
+    };
+
+    // Eğer işlem yapılması gereken fatura sayısı 300'ü geçiyorsa, Yapay Zeka isteği yapmadan doğrudan uyarı dön
+    if target_invoices.len() > 300 {
+        return Ok(DeepAnalyzeResponse {
+            explanation: format!(
+                "⚠ Derinlemesine içerik analizi için seçilen fatura sayısı ({}) 300 limitini aşmaktadır. Lütfen filtre uygulayarak fatura sayısını azaltın.",
+                target_invoices.len()
+            ),
+            matched_ids: vec![],
+            excel_data: None,
+            questions: None,
+            finalized: true,
+        });
+    }
+
+    let snippets: Vec<String> = target_invoices
         .iter()
         .enumerate()
         .map(|(i, inv)| {
             let raw_snippet = if inv.raw_text.len() > 4000 {
-                // ponytail: char-safe truncation — find last char boundary at or before 4000 bytes
                 let end = inv.raw_text.char_indices()
                     .map(|(i, _)| i)
                     .take_while(|&i| i <= 4000)
@@ -808,65 +964,32 @@ async fn deep_analyze(
 
     let all_text = snippets.join("\n========\n");
 
-    let mut conversation_text = String::new();
-    for msg in &history {
-        let role_label = match msg.role.to_lowercase().as_str() {
-            "user" => "Kullanıcı",
-            "assistant" => "Asistan",
-            _ => "Sistem",
-        };
-        conversation_text.push_str(&format!("{}: {}\n", role_label, msg.content));
-    }
-    conversation_text.push_str(&format!("Kullanıcı: {}\n", query));
-
-    let system_prompt = "Sen bir fatura analiz uzmanısın. Kullanıcı ile interaktif sohbet ederek faturaları analiz et ve gerekirse Excel dosyası oluştur. \
-        ÖNEMLİ: Eşleşen faturaları açıklama (explanation) metninde tek tek sıra halinde veya liste olarak yazarak kalabalık etme. Arayüz bu faturaları zaten otomatik olarak filtreleyip gösterecektir. Açıklama metninde sadece genel analiz, toplam adet/tutar bilgisi ve gerekiyorsa markdown tablosu olarak özet rapor sun. \
-        Eğer kullanıcı senden bir tablo/Excel oluşturmanı isterse, doğrudan oluşturmak yerine önce açıklama (explanation) kısmında kullanıcıya interaktif sorular sor (örn: 'Hangi sütunlar olsun?', 'Satırlarda hangi veriler yer alsın?', 'Filtre uygulamak ister misiniz?'). \
-        Eğer kullanıcı sorularını cevapladıysa ve tüm detaylar netleştiyse, verileri toparlayıp aşağıdaki formata uygun şekilde yanıtla: \
-        Yanıtını SADECE şu JSON formatında ver (başka hiçbir şey yazma, markdown veya kod bloğu kullanma):\
-        {\
-          \"explanation\": \"Markdown formatında detaylı cevap veya sohbet mesajı\", \
-          \"matched_indices\": [1, 5, 12], \
-          \"excel_data\": { \
-            \"sheet_name\": \"Excel Sayfa Adı\", \
-            \"headers\": [\"Sütun1\", \"Sütun2\", ...], \
-            \"rows\": [[\"Satır1_Hücre1\", \"Satır1_Hücre2\", ...], [\"Satır2_Hücre1\", ...]] \
-          } \
-        }\
-        Eğer henüz Excel oluşturmak için detaylar net değilse veya normal analiz yapıyorsan excel_data alanını null döndür.";
-
-    let user_prompt = format!(
-        "Faturalar ({} adet):\n\n{}\n\nGeçmiş Sohbet:\n{}\nLütfen en son kullanıcı sorusunu yanıtla.",
-        invoices.len(),
+    let user_prompt_phase2 = format!(
+        "Faturalar Detaylı İçerikleri ({} adet):\n\n{}\n\nGeçmiş Sohbet:\n{}\n\nLütfen tüm bu verilere göre nihai yanıtını oluştur, varsa excel_data objesini doldur ve finalized: true yap.",
+        target_invoices.len(),
         all_text,
         conversation_text
     );
 
-    let content = match provider.name.as_str() {
-        "gemini" => ai::chat_completion_gemini(&provider.api_key, &model, system_prompt, &user_prompt).await?,
-        "claude" => ai::chat_completion_claude(&provider.api_key, &model, system_prompt, &user_prompt).await?,
-        _ => ai::chat_completion_openai_compat(&provider, &model, system_prompt, &user_prompt, false).await?,
+    let content_phase2 = match provider.name.as_str() {
+        "gemini" => ai::chat_completion_gemini(&provider.api_key, &model, system_prompt, &user_prompt_phase2).await?,
+        "claude" => ai::chat_completion_claude(&provider.api_key, &model, system_prompt, &user_prompt_phase2).await?,
+        _ => ai::chat_completion_openai_compat(&provider, &model, system_prompt, &user_prompt_phase2, false).await?,
     };
 
-    let clean = crate::ai::clean_json(&content);
+    let clean_p2 = crate::ai::clean_json(&content_phase2);
+    let parsed_p2: serde_json::Value = serde_json::from_str(clean_p2)
+        .map_err(|e| format!("AI yanıtı parse hatası (Phase 2): {} | Ham: {}", e, clean_p2))?;
 
-    let parsed: serde_json::Value = serde_json::from_str(clean)
-        .map_err(|e| format!("AI yanıtı parse hatası: {} | Ham: {}", e, clean))?;
+    let explanation = parsed_p2["explanation"].as_str().unwrap_or("").to_string();
 
-    log::info!("deep_analyze - Raw content: {}", content);
-    log::info!("deep_analyze - Cleaned JSON: {}", clean);
-    log::info!("deep_analyze - Parsed matched_indices: {:?}", parsed["matched_indices"]);
-
-    let explanation = parsed["explanation"].as_str().unwrap_or("").to_string();
-
-    let excel_data: Option<ExcelData> = if parsed.get("excel_data").is_some() && !parsed["excel_data"].is_null() {
-        serde_json::from_value(parsed["excel_data"].clone()).ok()
+    let excel_data: Option<ExcelData> = if parsed_p2.get("excel_data").is_some() && !parsed_p2["excel_data"].is_null() {
+        serde_json::from_value(parsed_p2["excel_data"].clone()).ok()
     } else {
         None
     };
 
-    // matched_indices → invoice ID'lerine dönüştür (1-based → 0-based)
-    let matched_ids: Vec<String> = parsed["matched_indices"]
+    let matched_ids: Vec<String> = parsed_p2["matched_indices"]
         .as_array()
         .unwrap_or(&vec![])
         .iter()
@@ -877,9 +1000,15 @@ async fn deep_analyze(
         })
         .collect();
 
-    log::info!("deep_analyze - Resulting matched_ids (count {}): {:?}", matched_ids.len(), matched_ids);
+    log::info!("deep_analyze - Phase 2 matched_ids: {:?}", matched_ids);
 
-    Ok(DeepAnalyzeResponse { explanation, matched_ids, excel_data })
+    Ok(DeepAnalyzeResponse {
+        explanation,
+        matched_ids,
+        excel_data,
+        questions: None,
+        finalized: true,
+    })
 }
 
 #[tauri::command]

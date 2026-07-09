@@ -83,9 +83,19 @@ pub struct ExcelData {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MultipleChoiceQuestion {
+    pub id: String,
+    pub text: String,
+    pub options: Vec<String>,
+    pub allow_custom: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeepAnalyzeResponse {
     pub explanation: String,
     /// AI'nın ilgili bulduğu fatura ID'leri — frontend bunları grid filtrelemesi için kullanır
     pub matched_ids: Vec<String>,
     pub excel_data: Option<ExcelData>,
+    pub questions: Option<Vec<MultipleChoiceQuestion>>,
+    pub finalized: bool,
 }

@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import { useStore } from './store';
-import { Filter, Search, Folders, ChevronDown, ChevronUp, SlidersHorizontal, MessageSquare, FolderOpen, Microscope, X, Info } from 'lucide-react';
-import { PROVIDERS } from './types';
+import { Filter, Search, Folders, ChevronDown, ChevronUp, SlidersHorizontal, MessageSquare, FolderOpen, X, Info } from 'lucide-react';
 import type { Invoice } from './types';
 import { open, save } from '@tauri-apps/plugin-dialog';
 
@@ -56,18 +55,14 @@ export default function FilterPanel() {
   const {
     filterOptions, criteria, filtered, invoices,
     setCriteria, applyFilter, applyGroup, toggleIssuer, toggleRecipient, toggleLocation,
-    organizeFolders, organizeHierarchy, aiFilterAndGroup, aiFilter, aiChat, model1, model2, deepAnalyze, deepAnalysisChat,
-    availableModels, activeProvider, clearDeepAnalysis, clearDeepAnalysisFilter, refreshOptions,
+    organizeFolders, organizeHierarchy, model1, model2, deepAnalyze, deepAnalysisChat,
+    availableModels, clearDeepAnalysis, clearDeepAnalysisFilter, refreshOptions,
   } = useStore();
 
   const [groupBy, setGroupBy] = useState('issuer');
 
   const [outputDir, setOutputDir] = useState('');
-  const [chatInput, setChatInput] = useState('');
-  const [aiModel, setAiModel] = useState(availableModels[0] || model1);
-  const [showChat, setShowChat] = useState(false);
   const [folderMsg, setFolderMsg] = useState('');
-  const [isSmartFilter, setIsSmartFilter] = useState(false);
   const [showDeepAnalyze, setShowDeepAnalyze] = useState(false);
   const [deepQuery, setDeepQuery] = useState('');
   const [deepModel, setDeepModel] = useState(availableModels[0] || model1);
@@ -80,6 +75,9 @@ export default function FilterPanel() {
   const [modalChildGroup, setModalChildGroup] = useState('amount_range');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [currentQuestionIdx, setCurrentQuestionIdx] = useState(0);
+  const [wizardAnswers, setWizardAnswers] = useState<Record<string, string>>({});
+  const [customAnswer, setCustomAnswer] = useState('');
 
   const activeFilters = [
     criteria.issuers.length > 0 && `Düzenleyen: ${criteria.issuers.length}`,
@@ -97,16 +95,6 @@ export default function FilterPanel() {
     setSelectedIds(filtered.map(inv => inv.id));
     setFolderMsg('');
     setShowPreviewModal(true);
-  };
-
-  const handleSend = async () => {
-    if (!chatInput.trim()) return;
-    if (isSmartFilter) {
-      await aiFilter(chatInput.trim());
-    } else {
-      await aiFilterAndGroup(chatInput.trim(), aiModel);
-    }
-    setChatInput('');
   };
 
 
@@ -236,18 +224,10 @@ export default function FilterPanel() {
         </button>
 
         <button
-          onClick={() => setShowChat(!showChat)}
-          className="bg-amber-700 hover:bg-amber-600 text-white text-sm px-4 py-1.5 rounded-lg flex items-center gap-1.5"
-        >
-          <MessageSquare className="w-4 h-4" /> AI Chat {showChat ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-        </button>
-
-        <button
           onClick={() => setShowDeepAnalyze(!showDeepAnalyze)}
-          className="bg-purple-700 hover:bg-purple-600 text-white text-sm px-4 py-1.5 rounded-lg flex items-center gap-1.5"
-          title="300 faturaya kadar raw içerik analizi"
+          className="bg-purple-700 hover:bg-purple-600 text-white text-sm px-4 py-1.5 rounded-lg flex items-center gap-1.5 font-medium transition-all shadow-md shadow-purple-900/10"
         >
-          <Microscope className="w-4 h-4" /> Gelişmiş İnceleme {showDeepAnalyze ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+          <MessageSquare className="w-4 h-4" /> Nixie AI'ya Soru Sor {showDeepAnalyze ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
         </button>
 
         <span className="text-sm text-gray-500 ml-auto">
@@ -527,89 +507,13 @@ export default function FilterPanel() {
         </div>
       )}
 
-      {/* AI Chat panel */}
-      {showChat && (
-        <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 space-y-3">
-          <div className="flex items-center justify-between flex-wrap gap-2">
-            <h3 className="text-sm font-medium text-amber-300 flex items-center gap-2">
-              <MessageSquare className="w-4 h-4" /> AI Filtreleme ({PROVIDERS.find(p => p.name === activeProvider)?.label || activeProvider})
-            </h3>
-            <div className="flex items-center gap-4">
-              <label className="flex items-center gap-1.5 text-xs text-amber-200 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={isSmartFilter}
-                  onChange={(e) => setIsSmartFilter(e.target.checked)}
-                  className="w-3.5 h-3.5 rounded bg-gray-855 border-gray-700 text-amber-600 focus:ring-amber-500"
-                />
-                Akıllı Filtreleme Yetkisi
-              </label>
-              <select
-                value={aiModel}
-                onChange={(e) => setAiModel(e.target.value)}
-                className="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-xs text-amber-200"
-                title="AI Model Seç"
-              >
-                {availableModels.length > 0
-                  ? availableModels.map((m) => (
-                      <option key={m} value={m}>{m}</option>
-                    ))
-                  : <>
-                      <option value={model1}>{model1} (Hızlı)</option>
-                      <option value={model2}>{model2} (Akıllı)</option>
-                    </>
-                }
-              </select>
-            </div>
-          </div>
-          <div className="flex gap-2">
-            <input
-              type="text"
-              placeholder={isSmartFilter ? 'Örn: "kamera sistemleri alımları", "5000TL üstü İstanbul faturaları"' : 'Örn: "A firmasının 1000TL üstü İstanbul faturalarını grupla"'}
-              value={chatInput}
-              onChange={(e) => setChatInput(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-              className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-gray-200 placeholder-gray-600"
-            />
-            <button
-              onClick={handleSend}
-              disabled={aiChat.loading}
-              className="bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white text-sm px-4 py-1.5 rounded-lg"
-            >
-              {aiChat.loading ? '...' : 'Gönder'}
-            </button>
-          </div>
-          {aiChat.response && (
-            <div className="space-y-2">
-              {filtered.length < invoices.length && (
-                <div className="flex items-center justify-between text-xs text-amber-300 bg-amber-950/30 border border-amber-900/40 rounded-lg px-3 py-1.5 animate-fade-in">
-                  <div className="flex items-center gap-2">
-                    <span>📋</span>
-                    <span>Grid <strong className="text-amber-200">{filtered.length}</strong> ilgili faturaya filtrelendi</span>
-                  </div>
-                  <button
-                    onClick={clearFilters}
-                    className="text-amber-400 hover:text-amber-200 font-semibold"
-                  >
-                    Filtreyi Kaldır
-                  </button>
-                </div>
-              )}
-              <div className="text-sm text-amber-200 bg-amber-950/20 border border-amber-900/30 rounded-lg p-3 max-h-96 overflow-y-auto">
-                <MarkdownFormatter text={aiChat.response} />
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
       {/* Gelişmiş İnceleme panel */}
       {showDeepAnalyze && (
         <div className="bg-gray-900 border border-purple-800/50 rounded-lg p-4 space-y-3">
           <div className="flex items-center justify-between flex-wrap gap-2">
             <h3 className="text-sm font-medium text-purple-300 flex items-center gap-2">
-              <Microscope className="w-4 h-4" /> Gelişmiş İnceleme
-              <span className="text-xs text-gray-500 font-normal">— raw fatura içeriği üzerinden serbest soru</span>
+              <MessageSquare className="w-4 h-4" /> Nixie AI'ya Soru Sor
+              <span className="text-xs text-gray-500 font-normal">— Faturalarınız hakkında Nixie AI ile sohbet edin, analiz edin ve Excel raporları oluşturun</span>
             </h3>
             <div className="flex items-center gap-2">
               {deepAnalysisChat.messages.length > 0 && (
@@ -638,14 +542,6 @@ export default function FilterPanel() {
             </div>
           </div>
 
-          {/* 300+ uyarı */}
-          {invoices.length > 300 && (
-            <div className="flex items-center gap-2 bg-orange-950/40 border border-orange-700/50 rounded-lg px-3 py-2 text-xs text-orange-300">
-              <span className="font-semibold">⚠</span>
-              {invoices.length} fatura yüklü — Bu özellik ilk 300 faturayı analiz eder.
-            </div>
-          )}
-
           {/* Chat message stream */}
           {deepAnalysisChat.messages.length > 0 && (
             <div className="space-y-3 max-h-96 overflow-y-auto p-2 bg-gray-950/40 rounded-lg border border-gray-800">
@@ -669,10 +565,27 @@ export default function FilterPanel() {
                 </div>
               ))}
               
-              {/* Spinner if loading */}
-              {deepAnalysisChat.loading && (
+              {/* Spinner if loading and not finalized */}
+              {deepAnalysisChat.loading && !deepAnalysisChat.finalized && (
                 <div className="flex items-center gap-2 text-xs text-purple-400 animate-pulse py-2 px-1">
                   <span>🔍</span> Analiz ediliyor ve taranıyor...
+                </div>
+              )}
+
+              {/* Premium glowing scan animation if finalized and loading */}
+              {deepAnalysisChat.loading && deepAnalysisChat.finalized && (
+                <div className="flex flex-col items-center justify-center p-6 bg-purple-950/20 border border-purple-900/30 rounded-xl space-y-4 animate-pulse my-2 animate-fade-in">
+                  <div className="relative w-16 h-16">
+                    <div className="absolute inset-0 rounded-full border-2 border-purple-500/30 animate-ping"></div>
+                    <div className="absolute inset-2 rounded-full border-2 border-purple-500/60 animate-spin border-t-transparent"></div>
+                    <div className="absolute inset-0 flex items-center justify-center text-xl">
+                      📑
+                    </div>
+                  </div>
+                  <div className="text-center space-y-1">
+                    <h5 className="text-sm font-semibold text-purple-300">Faturalar Derinlemesine Analiz Ediliyor...</h5>
+                    <p className="text-[11px] text-gray-400">Tüm ürün kalemleri ve raw fatura metinleri taranıyor.</p>
+                  </div>
                 </div>
               )}
             </div>
@@ -757,6 +670,185 @@ export default function FilterPanel() {
             >
               {deepAnalysisChat.loading ? 'Gönderiliyor...' : 'Gönder'}
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Claude-style Wizard Modal */}
+      {showDeepAnalyze && deepAnalysisChat.questions && deepAnalysisChat.questions.length > 0 && !deepAnalysisChat.finalized && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-[#1e1e1e] border border-gray-850 rounded-2xl max-w-xl w-full shadow-2xl p-6 space-y-4 animate-in fade-in zoom-in duration-200 text-gray-200">
+            
+            {/* Header */}
+            <div className="flex items-center justify-between border-b border-gray-800 pb-3">
+              <span className="text-xs font-semibold text-purple-400 uppercase tracking-wider">Nixie AI Sihirbazı</span>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-gray-400">
+                  {currentQuestionIdx + 1} / {deepAnalysisChat.questions.length}
+                </span>
+                <button
+                  onClick={() => {
+                    useStore.setState((s) => ({
+                      deepAnalysisChat: { ...s.deepAnalysisChat, questions: null }
+                    }));
+                  }}
+                  className="text-gray-400 hover:text-gray-200 transition-colors"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            {/* Question Text */}
+            <div>
+              <h3 className="text-base font-medium text-gray-100">
+                {deepAnalysisChat.questions[currentQuestionIdx].text}
+              </h3>
+            </div>
+
+            {/* Options List */}
+            <div className="space-y-2">
+              {deepAnalysisChat.questions[currentQuestionIdx].options.map((option: string, optIdx: number) => (
+                <button
+                  key={optIdx}
+                  onClick={() => {
+                    const q = deepAnalysisChat.questions![currentQuestionIdx];
+                    const updated: Record<string, string> = { ...wizardAnswers, [q.id]: option };
+                    setWizardAnswers(updated);
+                    
+                    if (currentQuestionIdx + 1 < deepAnalysisChat.questions!.length) {
+                      setCurrentQuestionIdx(currentQuestionIdx + 1);
+                    } else {
+                      const formatted = deepAnalysisChat.questions!.map((question) => {
+                        const ans = updated[question.id] || "Belirtilmedi";
+                        return `Soru: ${question.text}\nCevap: ${ans}`;
+                      }).join("\n\n");
+                      deepAnalyze(`Sihirbaz Soruları Yanıtları:\n\n${formatted}`, deepModel, "Sihirbaz soruları yanıtlandı.");
+                      setCurrentQuestionIdx(0);
+                      setWizardAnswers({});
+                      useStore.setState((s) => ({
+                        deepAnalysisChat: { ...s.deepAnalysisChat, questions: null }
+                      }));
+                    }
+                  }}
+                  className="w-full text-left bg-gray-900 hover:bg-gray-800 border border-gray-800 hover:border-purple-900/50 rounded-xl px-4 py-3 flex items-center justify-between text-sm transition-all group cursor-pointer"
+                >
+                  <div className="flex items-center gap-3">
+                    <span className="bg-gray-800 group-hover:bg-purple-950/40 text-gray-400 group-hover:text-purple-300 w-6 h-6 rounded-lg flex items-center justify-center text-xs font-semibold">
+                      {optIdx + 1}
+                    </span>
+                    <span className="text-gray-300 group-hover:text-purple-200">{option}</span>
+                  </div>
+                  <span className="text-gray-500 group-hover:text-purple-400 group-hover:translate-x-1 transition-transform">→</span>
+                </button>
+              ))}
+            </div>
+
+            {/* Something else / Custom Input */}
+            {deepAnalysisChat.questions[currentQuestionIdx].allow_custom && (
+              <div className="pt-2 border-t border-gray-800/50 space-y-2">
+                <label className="text-xs text-gray-400">Farklı bir şey belirtin (İsteğe bağlı):</label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    placeholder="Buraya kendi yanıtınızı yazabilirsiniz..."
+                    value={customAnswer}
+                    onChange={(e) => setCustomAnswer(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && customAnswer.trim()) {
+                        const q = deepAnalysisChat.questions![currentQuestionIdx];
+                        const updated: Record<string, string> = { ...wizardAnswers, [q.id]: customAnswer.trim() };
+                        setWizardAnswers(updated);
+                        setCustomAnswer('');
+
+                        if (currentQuestionIdx + 1 < deepAnalysisChat.questions!.length) {
+                          setCurrentQuestionIdx(currentQuestionIdx + 1);
+                        } else {
+                          const formatted: string = deepAnalysisChat.questions!.map((question: any) => {
+                            const ans = updated[question.id] || "Belirtilmedi";
+                            return `Soru: ${question.text}\nCevap: ${ans}`;
+                          }).join("\n\n");
+                          deepAnalyze(`Sihirbaz Soruları Yanıtları:\n\n${formatted}`, deepModel, "Sihirbaz soruları yanıtlandı.");
+                          setCurrentQuestionIdx(0);
+                          setWizardAnswers({});
+                          useStore.setState((s) => ({
+                            deepAnalysisChat: { ...s.deepAnalysisChat, questions: null }
+                          }));
+                        }
+                      }
+                    }}
+                    className="flex-1 bg-gray-900 border border-gray-800 rounded-xl px-3 py-2 text-sm text-gray-250 placeholder-gray-600 focus:outline-none focus:border-purple-600"
+                  />
+                  <button
+                    onClick={() => {
+                      if (customAnswer.trim()) {
+                        const q = deepAnalysisChat.questions![currentQuestionIdx];
+                        const updated: Record<string, string> = { ...wizardAnswers, [q.id]: customAnswer.trim() };
+                        setWizardAnswers(updated);
+                        setCustomAnswer('');
+
+                        if (currentQuestionIdx + 1 < deepAnalysisChat.questions!.length) {
+                          setCurrentQuestionIdx(currentQuestionIdx + 1);
+                        } else {
+                          const formatted = deepAnalysisChat.questions!.map((question: any) => {
+                            const ans = updated[question.id] || "Belirtilmedi";
+                            return `Soru: ${question.text}\nCevap: ${ans}`;
+                          }).join("\n\n");
+                          deepAnalyze(`Sihirbaz Soruları Yanıtları:\n\n${formatted}`, deepModel, "Sihirbaz soruları yanıtlandı.");
+                          setCurrentQuestionIdx(0);
+                          setWizardAnswers({});
+                          useStore.setState((s) => ({
+                            deepAnalysisChat: { ...s.deepAnalysisChat, questions: null }
+                          }));
+                        }
+                      }
+                    }}
+                    disabled={!customAnswer.trim()}
+                    className="bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white px-4 py-2 rounded-xl text-sm whitespace-nowrap transition-all cursor-pointer"
+                  >
+                    Onayla
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Footer Navigation */}
+            <div className="flex items-center justify-between pt-2">
+              <button
+                disabled={currentQuestionIdx === 0}
+                onClick={() => setCurrentQuestionIdx(currentQuestionIdx - 1)}
+                className="text-xs text-gray-400 hover:text-gray-250 disabled:opacity-30 cursor-pointer"
+              >
+                ← Önceki Soru
+              </button>
+              
+              <button
+                onClick={() => {
+                  const q = deepAnalysisChat.questions![currentQuestionIdx];
+                  const updated: Record<string, string> = { ...wizardAnswers, [q.id]: "Pas Geçildi" };
+                  setWizardAnswers(updated);
+
+                  if (currentQuestionIdx + 1 < deepAnalysisChat.questions!.length) {
+                    setCurrentQuestionIdx(currentQuestionIdx + 1);
+                  } else {
+                    const formatted = deepAnalysisChat.questions!.map((question) => {
+                      const ans = updated[question.id] || "Belirtilmedi";
+                      return `Soru: ${question.text}\nCevap: ${ans}`;
+                    }).join("\n\n");
+                    deepAnalyze(`Sihirbaz Soruları Yanıtları:\n\n${formatted}`, deepModel, "Sihirbaz soruları yanıtlandı.");
+                    setCurrentQuestionIdx(0);
+                    setWizardAnswers({});
+                    useStore.setState((s) => ({
+                      deepAnalysisChat: { ...s.deepAnalysisChat, questions: null }
+                    }));
+                  }
+                }}
+                className="bg-gray-800 hover:bg-gray-700 text-gray-300 px-4 py-1.5 rounded-lg text-xs font-semibold cursor-pointer"
+              >
+                Geç (Skip)
+              </button>
+            </div>
+
           </div>
         </div>
       )}

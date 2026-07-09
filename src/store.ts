@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { Invoice, FilterOptions, FilterCriteria, GroupedInvoices, AiResponse, AiGroupedResponse, AiProviderConfig } from './types';
+import type { Invoice, FilterOptions, FilterCriteria, GroupedInvoices, AiResponse, AiGroupedResponse, AiProviderConfig, ChatMessage, ExcelData, MultipleChoiceQuestion, DeepAnalyzeResponse } from './types';
 
 const isTauri = typeof window !== 'undefined' && ('__TAURI__' in window || '__TAURI_INTERNALS__' in window);
 
@@ -25,7 +25,7 @@ interface AppStore {
   modelLoading: boolean;
   modelLoadingMessage: string;
   aiChat: { query: string; response: string; loading: boolean };
-  deepAnalysisChat: { messages: ChatMessage[]; loading: boolean; matchedIds: string[]; excelData: ExcelData | null };
+  deepAnalysisChat: { messages: ChatMessage[]; loading: boolean; matchedIds: string[]; excelData: ExcelData | null; questions: MultipleChoiceQuestion[] | null; finalized: boolean };
   providerConfigs: Record<string, AiProviderConfig>;
   activeProvider: string;
   availableModels: string[];
@@ -42,7 +42,7 @@ interface AppStore {
   removeInvoice: (id: string) => Promise<void>;
   fixInvoiceWithAi: (id: string) => Promise<void>;
   aiFilter: (query: string) => Promise<void>;
-  deepAnalyze: (query: string, model: string) => Promise<void>;
+  deepAnalyze: (query: string, model: string, displayQuery?: string) => Promise<void>;
   clearDeepAnalysis: () => void;
   clearDeepAnalysisFilter: () => void;
   aiFilterAndGroup: (query: string, model: string) => Promise<void>;
@@ -90,7 +90,7 @@ export const useStore = create<AppStore>((set, get) => ({
   modelLoading: true,
   modelLoadingMessage: 'AI Motoru Başlatılıyor...',
   aiChat: { query: '', response: '', loading: false },
-  deepAnalysisChat: { messages: [], loading: false, matchedIds: [], excelData: null },
+  deepAnalysisChat: { messages: [], loading: false, matchedIds: [], excelData: null, questions: null, finalized: false },
   providerConfigs: {},
   activeProvider: 'deepseek',
   availableModels: [],
@@ -282,7 +282,8 @@ export const useStore = create<AppStore>((set, get) => ({
   aiFilter: async (query) => {
     set((s) => ({ aiChat: { ...s.aiChat, query, loading: true } }));
     try {
-      const resp = await invoke<AiResponse>('ai_filter', { query });
+      const filteredIds = get().filtered.map((inv) => inv.id);
+      const resp = await invoke<AiResponse>('ai_filter', { query, filteredIds });
       set({
         criteria: resp.filter_criteria,
         aiChat: { query, response: resp.explanation, loading: false },
@@ -295,8 +296,9 @@ export const useStore = create<AppStore>((set, get) => ({
     }
   },
 
-  deepAnalyze: async (query, model) => {
-    const newMessages = [...get().deepAnalysisChat.messages, { role: 'user', content: query } as ChatMessage];
+  deepAnalyze: async (query, model, displayQuery) => {
+    const displayVal = displayQuery || query;
+    const newMessages = [...get().deepAnalysisChat.messages, { role: 'user', content: displayVal } as ChatMessage];
     set((s) => ({
       deepAnalysisChat: {
         ...s.deepAnalysisChat,
@@ -306,17 +308,20 @@ export const useStore = create<AppStore>((set, get) => ({
     }));
     try {
       const history = get().deepAnalysisChat.messages.slice(0, -1);
-      const resp = await invoke<DeepAnalyzeResponse>('deep_analyze', { query, history, model });
+      const filteredIds = get().filtered.map((inv) => inv.id);
+      const resp = await invoke<DeepAnalyzeResponse>('deep_analyze', { query, history, model, filteredIds });
       set((s) => {
-        const filtered = resp.matched_ids.length > 0
+        const filtered = resp.finalized && resp.matched_ids.length > 0
           ? s.invoices.filter((inv) => resp.matched_ids.includes(inv.id))
           : s.filtered;
         return {
           deepAnalysisChat: {
             messages: [...s.deepAnalysisChat.messages, { role: 'assistant', content: resp.explanation } as ChatMessage],
             loading: false,
-            matchedIds: resp.matched_ids,
-            excelData: resp.excel_data,
+            matchedIds: resp.finalized ? resp.matched_ids : [],
+            excelData: resp.finalized ? resp.excel_data : null,
+            questions: resp.questions,
+            finalized: resp.finalized,
           },
           filtered,
         };
@@ -334,7 +339,7 @@ export const useStore = create<AppStore>((set, get) => ({
 
   clearDeepAnalysis: () => {
     set({
-      deepAnalysisChat: { messages: [], loading: false, matchedIds: [], excelData: null }
+      deepAnalysisChat: { messages: [], loading: false, matchedIds: [], excelData: null, questions: null, finalized: false }
     });
     get().applyFilter();
   },
@@ -349,8 +354,8 @@ export const useStore = create<AppStore>((set, get) => ({
   aiFilterAndGroup: async (query, model) => {
     set((s) => ({ aiChat: { ...s.aiChat, query, loading: true } }));
     try {
-      const { criteria } = get();
-      const resp = await invoke<AiGroupedResponse>('ai_filter_and_group', { query, criteria, model });
+      const filteredIds = get().filtered.map((inv) => inv.id);
+      const resp = await invoke<AiGroupedResponse>('ai_filter_and_group', { query, filteredIds, model });
       const flatFiltered = resp.groups.flatMap((g) => g[1]);
       set({
         grouped: resp.groups,

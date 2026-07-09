@@ -96,7 +96,7 @@ export default function App() {
       <header className="border-b border-gray-800 bg-gray-900/70 backdrop-blur sticky top-0 z-20">
         <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white font-bold text-sm">
+            <div className="w-8 h-8 rounded-lg flex items-center justify-center text-white font-bold text-sm">
               <img src="/logo.png" alt="Logo" className="w-full h-full object-contain"></img>
             </div>
             <div>
@@ -342,26 +342,37 @@ export default function App() {
             )}
 
             <h2 className="text-xl font-semibold text-white flex items-center gap-2">
-              <Brain className="w-6 h-6 text-blue-500" />
+              <Brain className="w-6 h-6 text-purple-500" />
               Nasıl Kullanılır? (Sayfa {tutorialPage}/3)
             </h2>
 
             {tutorialPage === 1 && (
               <div className="text-sm text-gray-300 space-y-3">
-                <p>Fatura Filtreleme uygulaması yerleşik <b>Yapay Zeka (AI)</b> ile çalışır.</p>
-                <ul className="list-disc list-inside space-y-2 text-gray-400">
-                  <li><strong className="text-white">Akıllı AI Arama:</strong> Sağ menüdeki "AI Destekli Filtreleme" kısmına örneğin <i>"Geçen ayki demirbaş harcamaları neler?"</i> yazarsanız, sistem fatura içeriğindeki asıl ürün, hizmet ve açıklama metinlerini kullanarak mükemmel sonuçlar getirir.</li>
-                </ul>
+                <p>Nixie Invoice Filter uygulamasını 3 adımda kolayca kullanmaya başlayabilirsiniz:</p>
+                <div className="space-y-2 text-xs text-gray-400">
+                  <div className="bg-gray-950/40 p-2.5 rounded-lg border border-gray-800">
+                    <strong className="text-white block mb-0.5">1. Faturaları Yükleyin:</strong>
+                    PDF veya Excel faturalarınızı sürükleyip bırakarak uygulamaya yükleyin. Sistem saniyeler içinde tüm tutar, tarih, vergi numarası, alıcı ve düzenleyen bilgilerini okur.
+                  </div>
+                  <div className="bg-gray-950/40 p-2.5 rounded-lg border border-gray-800">
+                    <strong className="text-white block mb-0.5">2. Filtreleyin & Gruplayın:</strong>
+                    Üst kısımdaki hızlı filtre çiplerini (Düzenleyen, Alıcı, Yer), tutar/tarih aralıklarını veya kelime aramayı kullanarak faturalarınızı süzün.
+                  </div>
+                  <div className="bg-gray-950/40 p-2.5 rounded-lg border border-gray-800">
+                    <strong className="text-white block mb-0.5">3. Otomatik Klasörleyin:</strong>
+                    Filtrelenmiş faturalarınızı **"Klasörle"** butonuna basarak bilgisayarınızda otomatik olarak Tedarikçi, Alıcı veya Tarih klasörleri halinde düzenli dosyalara ayırın.
+                  </div>
+                </div>
               </div>
             )}
 
             {tutorialPage === 2 && (
               <div className="text-sm text-gray-300 space-y-3">
-                <p><b>Gelişmiş İnceleme (Deep Analysis)</b> ile faturaların ham PDF/Excel içerikleri üzerinde derinlemesine tarama yapabilirsiniz:</p>
+                <p>**Nixie AI ile Sohbet ve Excel Raporu Oluşturma**:</p>
                 <ul className="list-disc list-inside space-y-2 text-gray-400">
-                  <li><strong className="text-white">Raw İçerik Taraması:</strong> Yapay zeka, fatura kategorilerine bağlı kalmadan faturaların ham metinlerini (raw text) derinlemesine analiz eder.</li>
-                  <li><strong className="text-white">Akıllı Soru-Cevap:</strong> Örneğin <i>"kaç tane bilgisayar alındı?"</i> veya <i>"demirbaş alımları hangi tedarikçilerden yapıldı?"</i> gibi serbest sorular sorabilirsiniz.</li>
-                  <li><strong className="text-white">Otomatik Arayüz Filtreleme:</strong> Analiz sonucunda, aradığınız kriterle eşleşen faturalar arayüzde (tablo/kart görünümünde) otomatik olarak süzülür ve alakasız faturalar gizlenir.</li>
+                  <li><strong className="text-white">Nixie AI'ya Soru Sor:</strong> Alt paneli kullanarak faturalar hakkında serbestçe konuşabilirsiniz (örn. *"Ankara faturalarının özetini çıkar"*).</li>
+                  <li><strong className="text-white">İnteraktif Sihirbaz:</strong> AI'dan ürün kalemlerini de içeren bir Excel tablosu istediğinizde, size aradığınız kriterlerle ilgili sorular sorar. Soruları tamamladığınızda Excel tablonuz native olarak derlenir ve doğrudan bilgisayarınıza indirilebilir hale gelir.</li>
+                  <li><strong className="text-white">Dinamik Raw Metin Yükleme:</strong> Basit sorular 2 saniyede hızlıca yanıtlanır. Sadece derin detay gerektiren durumlarda sistem arka planda faturaların ham metinlerini (maks 300 fatura limitiyle) AI'a yükler.</li>
                 </ul>
               </div>
             )}
@@ -370,10 +381,12 @@ export default function App() {
               <div className="text-sm text-gray-300 space-y-3">
                 <p>Uygulamanın diğer gelişmiş özellikleri şunlardır:</p>
                 <ul className="list-disc list-inside space-y-2 text-gray-400">
-                  <li><strong className="text-white">AI ile Düzeltme (Cpu Simgesi):</strong> PDF'ler okunurken unvanların yanlış okunması durumunda (örneğin sadece "ŞTİ" yazması), fatura satırının sonundaki <b>CPU (AI ile Düzelt)</b> butonuna basarak yapay zekayla faturanın satıcı/alıcı bilgilerini otomatik düzeltebilirsiniz.</li>
-                  <li><strong className="text-white">Grup & Görünüm Seçenekleri:</strong> Tablo, Kart veya Gruplar görünümüyle faturaları tedarikçilerine veya tutarlarına göre gruplayabilirsiniz.</li>
-                  <li><strong className="text-white">Dosya & Hiyerarşi Düzenleme:</strong> Süzdüğünüz veya grupladığınız faturaları bilgisayarınızda otomatik olarak klasörleyebilir (Tedarikçi veya Tarih klasörleri açarak) veya Excel raporları oluşturabilirsiniz.</li>
+                  <li><strong className="text-white">AI ile Unvan Düzeltme (CPU Butonu):</strong> OCR işlemi sırasında şirket unvanları yarım/hatalı okunduysa, faturanın en sağındaki <b>CPU (AI ile Düzelt)</b> butonuna tıklayarak yapay zekayla bilgileri saniyeler içinde tam adına eşleştirebilirsiniz.</li>
+                  <li><strong className="text-white">Yerel Kategori Belleği:</strong> Faturalara elle atadığınız kategoriler yerel vektör tabanında saklanır. AI sonraki faturalarda bu kategorileri otomatik atamayı öğrenir.</li>
                 </ul>
+                <div className="pt-2 text-[11px] text-gray-500 border-t border-gray-800 text-center">
+                  *Bu uygulama <strong>GLM 5.2, DeepSeek ve Gemini</strong> yapay zeka modellerinin yardımıyla geliştirilmiştir.*
+                </div>
               </div>
             )}
 

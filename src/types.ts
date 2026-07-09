@@ -74,8 +74,17 @@ export interface ExcelData {
   rows: string[][];
 }
 
+export interface MultipleChoiceQuestion {
+  id: string;
+  text: string;
+  options: string[];
+  allow_custom: boolean;
+}
+
 export interface DeepAnalyzeResponse {
   explanation: string;
   matched_ids: string[];
   excel_data: ExcelData | null;
+  questions: MultipleChoiceQuestion[] | null;
+  finalized: boolean;
 }
