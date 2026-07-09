@@ -165,11 +165,6 @@ fn parse_openai_response(body: &serde_json::Value) -> Result<AiResponse, String>
 
 pub fn clean_json(raw: &str) -> &str {
     let clean_temp = raw.trim();
-    let first_char = clean_temp.chars().next().unwrap_or(' ');
-    
-    if first_char == '{' || first_char == '[' {
-        return clean_temp;
-    }
     
     let start_brace = clean_temp.find('{');
     let start_bracket = clean_temp.find('[');
@@ -182,10 +177,43 @@ pub fn clean_json(raw: &str) -> &str {
     };
     
     if let Some(start) = start_idx {
-        let end_char = if clean_temp.as_bytes()[start] == b'{' { '}' } else { ']' };
-        if let Some(end) = clean_temp.rfind(end_char) {
-            if end >= start {
-                return &clean_temp[start..=end];
+        let bytes = clean_temp.as_bytes();
+        let mut stack = Vec::new();
+        let mut in_string = false;
+        let mut escaped = false;
+        
+        for i in start..bytes.len() {
+            let c = bytes[i] as char;
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == '"' {
+                    in_string = false;
+                }
+            } else {
+                if c == '"' {
+                    in_string = true;
+                } else if c == '{' {
+                    stack.push('}');
+                } else if c == '[' {
+                    stack.push(']');
+                } else if c == '}' || c == ']' {
+                    if let Some(&expected) = stack.last() {
+                        if expected == c {
+                            stack.pop();
+                            if stack.is_empty() {
+                                return &clean_temp[start..=i];
+                            }
+                        } else {
+                            stack.pop();
+                            if stack.is_empty() {
+                                return &clean_temp[start..=i];
+                            }
+                        }
+                    }
+                }
             }
         }
     }

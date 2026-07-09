@@ -812,6 +812,12 @@ async fn deep_analyze(
         Çoktan seçmeli soruların seçenekleri net ve kısa olsun, ayrıca kullanıcının kendi cevabını yazabilmesi için 'allow_custom' değerini true yapabilirsin. \
         Eğer kullanıcının talebi netleştiyse veya zaten en baştan beri net ise, 'finalized' değerini true yap, 'questions' alanını null/boş yap ve analizini tamamla. \
         \
+        EXCEL DOSYASI OLUŞTURMA BİLGİSİ (ÇOK ÖNEMLİ): \
+        - Kullanıcı Excel dosyası istediğinde veya Excel'e aktarılacak bir tablo talep ettiğinde, 'excel_data' nesnesini mutlaka uygun başlık ve satırlarla doldur. \
+        - 'excel_data' nesnesini doldurduğunda, sistem bu verileri alıp arka planda otomatik olarak gerçek bir Excel (.xlsx) dosyası oluşturur ve arayüzde indirme butonu çıkartır. \
+        - Kullanıcıya 'fiziksel dosya oluşturamıyorum' veya 'sadece JSON döndürebiliyorum' gibi cümleler KESİNLİKLE kurma. \
+        - Bunun yerine, excel_data'yı doldurduğunu ve kullanıcının bu Excel dosyasını arayüzdeki 'Excel Dosyasını İndir' butonuna tıklayarak indirebileceğini 'explanation' alanında nazikçe belirt. \
+        \
         DETAYLI İÇERİK (RAW TEXT) ÇEKME MEKANİZMASI (ÇOK ÖNEMLİ): \
         - Sana ilk aşamada faturaların detaylı içeriği (ürünler, kalemler vb.) gönderilmez, sadece dosya adı, düzenleyen, alıcı, tutar ve tarih gibi üst bilgileri gönderilir. \
         - Kullanıcının sorusunu veya talebini yerine getirmek için faturaların detaylı içeriğine (ürün adları, kalem detayları, KDV oranları vb.) İHTİYACIN VARSA, JSON yanıtındaki 'needs_raw_text' alanını true VE 'finalized' alanını true yapmak ZORUNDASIN. \
