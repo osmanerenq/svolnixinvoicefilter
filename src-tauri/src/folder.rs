@@ -4,6 +4,7 @@ use std::path::Path;
 pub fn organize_into_folders(
     groups: &[(String, Vec<crate::types::Invoice>)],
     base_dir: &str,
+    copy_only: bool,
 ) -> Result<usize, String> {
     let base = Path::new(base_dir);
     fs::create_dir_all(base).map_err(|e| format!("Ana dizin oluşturulamadı: {}", e))?;
@@ -11,29 +12,40 @@ pub fn organize_into_folders(
     let mut moved = 0usize;
 
     for (group_name, invoices) in groups {
-        let safe_name = group_name
-            .replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
-        let group_dir = base.join(&safe_name);
-        fs::create_dir_all(&group_dir).map_err(|e| format!("Klasör oluşturulamadı {}: {}", safe_name, e))?;
+        let group_dir = if group_name.is_empty() {
+            base.to_path_buf()
+        } else {
+            let safe_name = group_name
+                .replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+            let gd = base.join(&safe_name);
+            fs::create_dir_all(&gd).map_err(|e| format!("Klasör oluşturulamadı {}: {}", safe_name, e))?;
+            gd
+        };
 
         for inv in invoices {
             let src = Path::new(&inv.full_path);
             let dst = group_dir.join(&inv.filename);
             if src != dst && src.exists() {
-                fs::rename(src, &dst).map_err(|e| format!("Taşıma hatası {}: {}", inv.filename, e))?;
+                if copy_only {
+                    fs::copy(src, &dst).map_err(|e| format!("Kopyalama hatası {}: {}", inv.filename, e))?;
+                } else {
+                    fs::rename(src, &dst).map_err(|e| format!("Taşıma hatası {}: {}", inv.filename, e))?;
+                }
                 moved += 1;
             }
         }
 
-        // Save group summary as JSON alongside the files
-        let summary_path = group_dir.join("_group_summary.json");
-        let summary = serde_json::to_string_pretty(&serde_json::json!({
-            "group": group_name,
-            "count": invoices.len(),
-            "files": invoices.iter().map(|i| i.filename.clone()).collect::<Vec<_>>()
-        }))
-        .unwrap_or_default();
-        let _ = fs::write(summary_path, summary);
+        // Save group summary as JSON alongside the files only if group_name is not empty
+        if !group_name.is_empty() {
+            let summary_path = group_dir.join("_group_summary.json");
+            let summary = serde_json::to_string_pretty(&serde_json::json!({
+                "group": group_name,
+                "count": invoices.len(),
+                "files": invoices.iter().map(|i| i.filename.clone()).collect::<Vec<_>>()
+            }))
+            .unwrap_or_default();
+            let _ = fs::write(summary_path, summary);
+        }
     }
 
     Ok(moved)
@@ -44,6 +56,7 @@ pub fn organize_into_hierarchy(
     groups: &[(String, Vec<crate::types::Invoice>)],
     base_dir: &str,
     sub_group_by: &str,
+    copy_only: bool,
 ) -> Result<usize, String> {
     let base = Path::new(base_dir);
     let mut moved = 0usize;
@@ -81,8 +94,13 @@ pub fn organize_into_hierarchy(
                 let src = Path::new(&inv.full_path);
                 let dst = sub_dir.join(&inv.filename);
                 if src != dst && src.exists() {
-                    fs::rename(src, &dst)
-                        .map_err(|e| format!("Taşıma {}: {}", inv.filename, e))?;
+                    if copy_only {
+                        fs::copy(src, &dst)
+                            .map_err(|e| format!("Kopyalama {}: {}", inv.filename, e))?;
+                    } else {
+                        fs::rename(src, &dst)
+                            .map_err(|e| format!("Taşıma {}: {}", inv.filename, e))?;
+                    }
                     moved += 1;
                 }
             }

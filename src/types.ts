@@ -11,8 +11,6 @@ export interface Invoice {
   tax_number: string;
   description: string;
   raw_text: string;
-  embedding?: number[];
-  category: string;
   ai_parsed: boolean;
 }
 
@@ -39,7 +37,6 @@ export interface FilterOptions {
   date_max: string;
   amount_min: number;
   amount_max: number;
-  categories: string[];
 }
 
 export interface FilterCriteria {
@@ -51,7 +48,6 @@ export interface FilterCriteria {
   amount_min: number;
   amount_max: number;
   search_text: string;
-  categories: string[];
 }
 
 export interface AiResponse {

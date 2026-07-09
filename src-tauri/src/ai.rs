@@ -33,8 +33,8 @@ fn get_filter_prompt(invoices: &[crate::types::Invoice], query: &str) -> String 
         .iter()
         .map(|inv| {
             format!(
-                "{} | Düzenleyen:{} Alıcı:{} Tutar:{:.2}TL Tarih:{} Yer:{} Kategori:{}",
-                inv.filename, inv.issuer, inv.recipient, inv.amount, inv.date, inv.location, inv.category
+                "{} | Düzenleyen:{} Alıcı:{} Tutar:{:.2}TL Tarih:{} Yer:{}",
+                inv.filename, inv.issuer, inv.recipient, inv.amount, inv.date, inv.location
             )
         })
         .collect();
@@ -163,20 +163,38 @@ fn parse_openai_response(body: &serde_json::Value) -> Result<AiResponse, String>
     parse_json_response(content)
 }
 
-fn parse_json_response(raw: &str) -> Result<AiResponse, String> {
+pub fn clean_json(raw: &str) -> &str {
     let clean_temp = raw.trim();
-    let clean = if clean_temp.starts_with("```") {
-        let first_line_end = clean_temp.find('\n').unwrap_or(0);
-        let end_block = clean_temp.rfind("```").unwrap_or(clean_temp.len());
-        if end_block > first_line_end {
-            clean_temp[first_line_end..end_block].trim()
-        } else {
-            clean_temp
-        }
-    } else {
-        clean_temp
+    let first_char = clean_temp.chars().next().unwrap_or(' ');
+    
+    if first_char == '{' || first_char == '[' {
+        return clean_temp;
+    }
+    
+    let start_brace = clean_temp.find('{');
+    let start_bracket = clean_temp.find('[');
+    
+    let start_idx = match (start_brace, start_bracket) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
     };
+    
+    if let Some(start) = start_idx {
+        let end_char = if clean_temp.as_bytes()[start] == b'{' { '}' } else { ']' };
+        if let Some(end) = clean_temp.rfind(end_char) {
+            if end >= start {
+                return &clean_temp[start..=end];
+            }
+        }
+    }
+    
+    clean_temp
+}
 
+fn parse_json_response(raw: &str) -> Result<AiResponse, String> {
+    let clean = clean_json(raw);
     serde_json::from_str(clean)
         .map_err(|e| format!("AI yanıtı parse hatası: {} | Ham: {}", e, clean))
 }
@@ -392,8 +410,4 @@ pub async fn chat_completion_claude(
             .and_then(|c| c["text"].as_str()))
         .ok_or("Claude yanıtı boş")?;
     Ok(content.to_string())
-}
-
-pub async fn ai_rerank(query: &str, _invoices: &[crate::types::Invoice], _api_key: &str, _model: &str) -> Result<Vec<String>, String> {
-    Err("ai_rerank henuz coklu saglayici desteklemiyor".into())
 }

@@ -1,5 +1,4 @@
 use crate::types::Invoice;
-use std::collections::HashSet;
 
 fn normalize_str(s: &str) -> String {
     s.to_lowercase()
@@ -17,29 +16,6 @@ fn normalize_str(s: &str) -> String {
 }
 
 pub fn filter_invoices(invoices: &[Invoice], criteria: &crate::types::FilterCriteria) -> Vec<Invoice> {
-    // Pre-compute semantic search matches if ~ prefix
-    let semantic_ids: Option<HashSet<String>> = if criteria.search_text.starts_with('~') {
-        let query = &criteria.search_text[1..];
-        let targets: Vec<(Vec<f32>, usize)> = invoices
-            .iter()
-            .enumerate()
-            .filter_map(|(i, inv)| inv.embedding.as_ref().map(|e| (e.clone(), i)))
-            .collect();
-        if targets.is_empty() {
-            Some(HashSet::new())
-        } else {
-            let matches = crate::embedding::search_similar(query, &targets, invoices.len());
-            Some(
-                matches
-                    .into_iter()
-                    .map(|(idx, _)| invoices[idx].id.clone())
-                    .collect(),
-            )
-        }
-    } else {
-        None
-    };
-
     invoices
         .iter()
         .filter(|inv| {
@@ -65,37 +41,24 @@ pub fn filter_invoices(invoices: &[Invoice], criteria: &crate::types::FilterCrit
                 return false;
             }
             if !criteria.search_text.is_empty() {
-                if let Some(ref ids) = semantic_ids {
-                    if !ids.contains(&inv.id) {
+                let text_lower = normalize_str(&format!("{} {}", inv.description, inv.raw_text));
+                let keywords: Vec<String> = criteria
+                    .search_text
+                    .split(',')
+                    .map(|k| normalize_str(k.trim()))
+                    .filter(|k| !k.is_empty())
+                    .collect();
+
+                if !keywords.is_empty() {
+                    let matched = keywords.iter().filter(|k| text_lower.contains(k.as_str())).count();
+                    let min_matches = if keywords.len() >= 3 {
+                        (keywords.len() / 2).max(1)
+                    } else {
+                        1
+                    };
+                    if matched < min_matches {
                         return false;
                     }
-                } else {
-                    let text_lower = normalize_str(&format!("{} {}", inv.description, inv.raw_text));
-                    let keywords: Vec<String> = criteria
-                        .search_text
-                        .split(',')
-                        .map(|k| normalize_str(k.trim()))
-                        .filter(|k| !k.is_empty())
-                        .collect();
-
-                    if !keywords.is_empty() {
-                        let matched = keywords.iter().filter(|k| text_lower.contains(k.as_str())).count();
-                        let min_matches = if keywords.len() >= 3 {
-                            (keywords.len() / 2).max(1)
-                        } else {
-                            1
-                        };
-                        if matched < min_matches {
-                            return false;
-                        }
-                    }
-                }
-            }
-            if !criteria.categories.is_empty() {
-                let inv_cat = normalize_str(&inv.category);
-                let found = criteria.categories.iter().any(|c| normalize_str(c) == inv_cat);
-                if !found {
-                    return false;
                 }
             }
             true
@@ -104,36 +67,10 @@ pub fn filter_invoices(invoices: &[Invoice], criteria: &crate::types::FilterCrit
         .collect()
 }
 
-pub fn category_filter(invoices: &[Invoice], categories: &[String]) -> Vec<Invoice> {
-    if categories.is_empty() {
-        return invoices.to_vec();
-    }
-    let normalized_cats: Vec<String> = categories.iter().map(|c| normalize_str(c)).collect();
-    invoices
-        .iter()
-        .filter(|inv| {
-            let inv_cat = normalize_str(&inv.category);
-            normalized_cats.iter().any(|c| *c == inv_cat)
-        })
-        .cloned()
-        .collect()
-}
-
-#[allow(dead_code)]
-pub fn search_by_embedding(
-    query: &str,
-    invoices_and_embeddings: &[(crate::types::Invoice, Vec<f32>)],
-    top_n: usize,
-) -> Vec<(usize, f32)> {
-    let targets: Vec<(Vec<f32>, usize)> = invoices_and_embeddings
-        .iter()
-        .enumerate()
-        .map(|(i, (_, emb))| (emb.clone(), i))
-        .collect();
-    crate::embedding::search_similar(query, &targets, top_n)
-}
-
 pub fn group_and_sort(invoices: &[Invoice], group_by: &str) -> Vec<(String, Vec<Invoice>)> {
+    if group_by == "none" {
+        return vec![("".to_string(), invoices.to_vec())];
+    }
     let mut groups: std::collections::HashMap<String, Vec<Invoice>> = std::collections::HashMap::new();
 
     for inv in invoices {

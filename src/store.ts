@@ -41,19 +41,16 @@ interface AppStore {
   loadModels: () => Promise<void>;
   removeInvoice: (id: string) => Promise<void>;
   fixInvoiceWithAi: (id: string) => Promise<void>;
-  updateInvoiceCategory: (id: string, category: string) => Promise<void>;
-  syncCacheToMemory: () => Promise<number>;
   aiFilter: (query: string) => Promise<void>;
   deepAnalyze: (query: string, model: string) => Promise<void>;
   clearDeepAnalysisFilter: () => void;
   aiFilterAndGroup: (query: string, model: string) => Promise<void>;
-  organizeFolders: (groupBy: string, outputDir: string) => Promise<number>;
-  organizeHierarchy: (parent: string, child: string, outputDir: string) => Promise<number>;
+  organizeFolders: (groupBy: string, outputDir: string, selectedIds?: string[], copyOnly?: boolean) => Promise<number>;
+  organizeHierarchy: (parent: string, child: string, outputDir: string, selectedIds?: string[], copyOnly?: boolean) => Promise<number>;
   clearAll: () => Promise<void>;
   toggleIssuer: (issuer: string) => void;
   toggleRecipient: (r: string) => void;
   toggleLocation: (loc: string) => void;
-  toggleCategory: (cat: string) => void;
   setProviderConfig: (providerName: string, apiKey: string) => Promise<void>;
   deleteProviderConfig: (providerName: string) => Promise<void>;
   fetchModels: (providerName: string) => Promise<void>;
@@ -71,7 +68,6 @@ export const useStore = create<AppStore>((set, get) => ({
     date_max: '',
     amount_min: 0,
     amount_max: 0,
-    categories: [],
   },
   criteria: {
     issuers: [],
@@ -82,7 +78,6 @@ export const useStore = create<AppStore>((set, get) => ({
     amount_min: 0,
     amount_max: 0,
     search_text: '',
-    categories: [],
   },
   filtered: [],
   grouped: [],
@@ -281,31 +276,7 @@ export const useStore = create<AppStore>((set, get) => ({
     }
   },
 
-  updateInvoiceCategory: async (id, category) => {
-    try {
-      await invoke('update_invoice_category', { id, newCategory: category });
-      const filterOptions = await invoke<FilterOptions>('get_filter_options');
-      set((s) => ({
-        invoices: s.invoices.map((inv) => inv.id === id ? { ...inv, category } : inv),
-        filtered: s.filtered.map((inv) => inv.id === id ? { ...inv, category } : inv),
-        grouped: s.grouped.map(([k, v]) => [k, v.map((inv) => inv.id === id ? { ...inv, category } : inv)] as [string, Invoice[]]),
-        filterOptions,
-      }));
-    } catch (e) {
-      console.error("Kategori guncelleme hatasi", e);
-      throw e;
-    }
-  },
 
-  syncCacheToMemory: async () => {
-    try {
-      const count = await invoke<number>('sync_cache_to_memory');
-      return count;
-    } catch (e) {
-      console.error("Hafıza eşitleme hatası", e);
-      throw e;
-    }
-  },
 
   aiFilter: async (query) => {
     set((s) => ({ aiChat: { ...s.aiChat, query, loading: true } }));
@@ -327,13 +298,22 @@ export const useStore = create<AppStore>((set, get) => ({
     set((s) => ({ deepAnalysisChat: { ...s.deepAnalysisChat, query, loading: true } }));
     try {
       const resp = await invoke<{ explanation: string; matched_ids: string[] }>('deep_analyze', { query, model });
-      set((s) => ({
-        deepAnalysisChat: { query, response: resp.explanation, loading: false, matchedIds: resp.matched_ids },
-        // matched_ids varsa gridi filtrele, yoksa olduğu gibi bırak
-        filtered: resp.matched_ids.length > 0
+      console.log("deepAnalyze response:", resp);
+      set((s) => {
+        console.log("Zustand invoices count:", s.invoices.length);
+        if (s.invoices.length > 0) {
+          console.log("Sample invoice ID from store:", s.invoices[0].id);
+          console.log("Sample matched_id from response:", resp.matched_ids[0]);
+        }
+        const filtered = resp.matched_ids.length > 0
           ? s.invoices.filter((inv) => resp.matched_ids.includes(inv.id))
-          : s.filtered,
-      }));
+          : s.filtered;
+        console.log("Filtered count after deepAnalyze:", filtered.length);
+        return {
+          deepAnalysisChat: { query, response: resp.explanation, loading: false, matchedIds: resp.matched_ids },
+          filtered,
+        };
+      });
     } catch (e: any) {
       set((s) => ({ deepAnalysisChat: { ...s.deepAnalysisChat, response: String(e), loading: false } }));
     }
@@ -362,14 +342,14 @@ export const useStore = create<AppStore>((set, get) => ({
     }
   },
 
-  organizeFolders: async (groupBy, outputDir) => {
+  organizeFolders: async (groupBy, outputDir, selectedIds, copyOnly) => {
     const { criteria } = get();
-    return invoke<number>('organize_folders', { criteria, groupBy, outputDir });
+    return invoke<number>('organize_folders', { criteria, groupBy, outputDir, selectedIds, copyOnly });
   },
 
-  organizeHierarchy: async (parent, child, outputDir) => {
+  organizeHierarchy: async (parent, child, outputDir, selectedIds, copyOnly) => {
     const { criteria } = get();
-    return invoke<number>('organize_hierarchy', { criteria, parentGroup: parent, childGroup: child, outputDir });
+    return invoke<number>('organize_hierarchy', { criteria, parentGroup: parent, childGroup: child, outputDir, selectedIds, copyOnly });
   },
 
   clearAll: async () => {
@@ -382,11 +362,11 @@ export const useStore = create<AppStore>((set, get) => ({
       invoices: [],
       filterOptions: {
         issuers: [], recipients: [], locations: [],
-        date_min: '', date_max: '', amount_min: 0, amount_max: 0, categories: [],
+        date_min: '', date_max: '', amount_min: 0, amount_max: 0,
       },
       criteria: {
         issuers: [], recipients: [], locations: [],
-        date_min: '', date_max: '', amount_min: 0, amount_max: 0, search_text: '', categories: [],
+        date_min: '', date_max: '', amount_min: 0, amount_max: 0, search_text: '',
       },
       filtered: [],
       grouped: [],
@@ -420,14 +400,7 @@ export const useStore = create<AppStore>((set, get) => ({
     });
   },
 
-  toggleCategory: (cat) => {
-    set((s) => {
-      const categories = s.criteria.categories.includes(cat)
-        ? s.criteria.categories.filter((c) => c !== cat)
-        : [...s.criteria.categories, cat];
-      return { criteria: { ...s.criteria, categories } };
-    });
-  },
+
 }));
 
 function getDefaultModels(provider: string): [string, string] {

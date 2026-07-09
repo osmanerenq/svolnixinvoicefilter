@@ -23,10 +23,6 @@ pub struct Invoice {
     pub description: String,
     pub raw_text: String,
     #[serde(default)]
-    pub embedding: Option<Vec<f32>>,
-    #[serde(default)]
-    pub category: String,
-    #[serde(default)]
     pub ai_parsed: bool,
 }
 
@@ -39,8 +35,6 @@ pub struct FilterOptions {
     pub date_max: String,
     pub amount_min: f64,
     pub amount_max: f64,
-    #[serde(default)]
-    pub categories: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,14 +47,6 @@ pub struct FilterCriteria {
     pub amount_min: f64,
     pub amount_max: f64,
     pub search_text: String,
-    #[serde(default)]
-    pub categories: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SemanticSearchResult {
-    pub invoice_id: String,
-    pub score: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

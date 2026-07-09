@@ -9,7 +9,7 @@ import { PROVIDERS } from './types';
 export default function App() {
   const {
     apiKey, clearAll, invoices, model1, model2, setModels, loadModels,
-    initListeners, modelLoading, modelLoadingMessage, syncCacheToMemory,
+    initListeners, modelLoading, modelLoadingMessage,
     providerConfigs, activeProvider, availableModels,
     setProviderConfig, deleteProviderConfig, fetchModels, setActiveProvider,
   } = useStore();
@@ -249,24 +249,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* Save models to memory */}
-            <div className="border-t border-gray-800 pt-3">
-              <label className="block text-xs text-gray-400 mb-1">Eğitim & Bellek Yönetimi</label>
-              <button
-                onClick={async () => {
-                  setKeyMsg('Bellek senkronize ediliyor...');
-                  try {
-                    const count = await syncCacheToMemory();
-                    setKeyMsg(`Başarılı: Önbellekten ${count} adet kategori eğitildi.`);
-                  } catch (e: any) {
-                    setKeyMsg(`Hata: ${e}`);
-                  }
-                }}
-                className="w-full text-xs px-3 py-2 bg-gray-800 hover:bg-gray-700 text-blue-400 rounded-lg font-medium transition-colors flex items-center justify-center gap-1.5"
-              >
-                <Brain className="w-3.5 h-3.5" /> Önbellek Kategorilerini Eğitime Aktar
-              </button>
-            </div>
+
 
             {/* Saved providers summary */}
             {Object.keys(providerConfigs).length > 0 && (
@@ -367,9 +350,7 @@ export default function App() {
               <div className="text-sm text-gray-300 space-y-3">
                 <p>Fatura Filtreleme uygulaması yerleşik <b>Yapay Zeka (AI)</b> ile çalışır.</p>
                 <ul className="list-disc list-inside space-y-2 text-gray-400">
-                  <li><strong className="text-white">Otomatik Kategorizasyon:</strong> Yüklediğiniz faturalar otomatik olarak kategorize edilir.</li>
-                  <li><strong className="text-white">Kategori Düzeltme (Öğrenme):</strong> Eğer sistem faturayı yanlış kategorize etmişse, tablodan veya karttan kategoriye tıklayıp doğrusunu yazıp <b>Enter</b> tuşuna basmanız yeterlidir. Sistem bunu <b>hemen öğrenecek</b> ve benzer faturalar için gelecekte hep bu kategoriyi kullanacaktır!</li>
-                  <li><strong className="text-white">Akıllı AI Arama:</strong> Sağ menüdeki "AI Destekli Filtreleme" kısmına örneğin <i>"Geçen ayki demirbaş harcamaları neler?"</i> yazarsanız, sistem kendi eğittiğiniz bu kategorileri de kullanarak mükemmel sonuçlar getirir.</li>
+                  <li><strong className="text-white">Akıllı AI Arama:</strong> Sağ menüdeki "AI Destekli Filtreleme" kısmına örneğin <i>"Geçen ayki demirbaş harcamaları neler?"</i> yazarsanız, sistem fatura içeriğindeki asıl ürün, hizmet ve açıklama metinlerini kullanarak mükemmel sonuçlar getirir.</li>
                 </ul>
               </div>
             )}
@@ -390,8 +371,8 @@ export default function App() {
                 <p>Uygulamanın diğer gelişmiş özellikleri şunlardır:</p>
                 <ul className="list-disc list-inside space-y-2 text-gray-400">
                   <li><strong className="text-white">AI ile Düzeltme (Cpu Simgesi):</strong> PDF'ler okunurken unvanların yanlış okunması durumunda (örneğin sadece "ŞTİ" yazması), fatura satırının sonundaki <b>CPU (AI ile Düzelt)</b> butonuna basarak yapay zekayla faturanın satıcı/alıcı bilgilerini otomatik düzeltebilirsiniz.</li>
-                  <li><strong className="text-white">Grup & Görünüm Seçenekleri:</strong> Tablo, Kart veya Gruplar görünümüyle faturaları tedarikçilerine, tutarlarına veya kategorilerine göre gruplayabilirsiniz.</li>
-                  <li><strong className="text-white">Dosya & Hiyerarşi Düzenleme:</strong> Süzdüğünüz veya grupladığınız faturaları bilgisayarınızda otomatik olarak klasörleyebilir (Elektrik, Su, Yemek klasörleri açarak) veya Excel raporları oluşturabilirsiniz.</li>
+                  <li><strong className="text-white">Grup & Görünüm Seçenekleri:</strong> Tablo, Kart veya Gruplar görünümüyle faturaları tedarikçilerine veya tutarlarına göre gruplayabilirsiniz.</li>
+                  <li><strong className="text-white">Dosya & Hiyerarşi Düzenleme:</strong> Süzdüğünüz veya grupladığınız faturaları bilgisayarınızda otomatik olarak klasörleyebilir (Tedarikçi veya Tarih klasörleri açarak) veya Excel raporları oluşturabilirsiniz.</li>
                 </ul>
               </div>
             )}

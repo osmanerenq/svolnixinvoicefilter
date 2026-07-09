@@ -3,8 +3,8 @@ pub mod parser;
 mod filter;
 mod ai;
 mod folder;
-pub mod embedding;
-pub mod memory;
+pub mod ubl;
+
 
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -24,7 +24,6 @@ struct AppState {
     active_provider: Mutex<String>,
     model1: Mutex<String>,  // user-configurable model 1 (fast)
     model2: Mutex<String>,  // user-configurable model 2 (smart)
-    vkn_cache: Mutex<HashMap<String, String>>, // persistent VKN dictionary
     parse_cache: Mutex<HashMap<String, Vec<Invoice>>>, // persistent parsing results cache
     models_dir: Mutex<String>,
 }
@@ -40,12 +39,7 @@ pub fn get_app_dir() -> PathBuf {
     path.push(".receiptfilterapp");
     let _ = std::fs::create_dir_all(&path);
     
-    // Migrate files if they exist in current working directory
-    let old_vkn = PathBuf::from("vkn_cache.json");
-    let new_vkn = path.join("vkn_cache.json");
-    if old_vkn.exists() && !new_vkn.exists() {
-        let _ = std::fs::copy(&old_vkn, &new_vkn);
-    }
+
 
     let old_cfg = PathBuf::from("config.json");
     let new_cfg = path.join("config.json");
@@ -62,11 +56,7 @@ pub fn get_app_dir() -> PathBuf {
     path
 }
 
-fn get_cache_path() -> PathBuf {
-    let mut p = get_app_dir();
-    p.push("vkn_cache.json");
-    p
-}
+
 
 fn get_parse_cache_path() -> PathBuf {
     let mut p = get_app_dir();
@@ -98,31 +88,7 @@ fn save_parse_cache(map: &HashMap<String, Vec<Invoice>>) {
     }
 }
 
-fn load_vkn_cache() -> HashMap<String, String> {
-    let path = get_cache_path();
-    if path.exists() {
-        if let Ok(mut file) = File::open(path) {
-            let mut content = String::new();
-            if file.read_to_string(&mut content).is_ok() {
-                if let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&content) {
-                    return map;
-                }
-            }
-        }
-    }
-    let mut default_map = HashMap::new();
-    default_map.insert("0860574079".to_string(), "ASC ENERJİ ANONİM ŞİRKETİ".to_string());
-    default_map
-}
 
-fn save_vkn_cache(map: &HashMap<String, String>) {
-    let path = get_cache_path();
-    if let Ok(content) = serde_json::to_string_pretty(map) {
-        if let Ok(mut file) = File::create(path) {
-            let _ = file.write_all(content.as_bytes());
-        }
-    }
-}
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct AppConfig {
@@ -199,31 +165,7 @@ fn save_config(state: &AppState) {
     }
 }
 
-fn download_model_files(models_dir: &std::path::Path) -> Result<(), String> {
-    use hf_hub::api::sync::Api;
 
-    // Önce bozuk/yanlış dosyaları temizle
-    let _ = std::fs::remove_file(models_dir.join("model.onnx"));
-    let _ = std::fs::remove_file(models_dir.join("tokenizer.json"));
-
-    let api = Api::new().map_err(|e| format!("HF API: {}", e))?;
-    // paraphrase-multilingual-MiniLM-L12-v2: ~118MB quantized. Türkçe dahil 50+ dili çok iyi anlar.
-    let repo = api.model("Xenova/paraphrase-multilingual-MiniLM-L12-v2".into());
-
-    log::info!("Model indiriliyor: Xenova/paraphrase-multilingual-MiniLM-L12-v2 (~118MB)...");
-    let model_src = repo.get("onnx/model_quantized.onnx")
-        .map_err(|e| format!("Model indirme: {}", e))?;
-    log::info!("Tokenizer indiriliyor...");
-    let tokenizer_src = repo.get("tokenizer.json")
-        .map_err(|e| format!("Tokenizer indirme: {}", e))?;
-
-    std::fs::copy(&model_src, models_dir.join("model.onnx"))
-        .map_err(|e| format!("Model kopyalama: {}", e))?;
-    std::fs::copy(&tokenizer_src, models_dir.join("tokenizer.json"))
-        .map_err(|e| format!("Tokenizer kopyalama: {}", e))?;
-
-    Ok(())
-}
 
 fn get_file_cache_key(path: &str) -> String {
     let filename = std::path::Path::new(path)
@@ -303,7 +245,14 @@ async fn load_files(
             let _permit = parse_sem_clone.acquire().await.unwrap();
             let key = get_file_cache_key(&path);
             let parsed_result = if path.ends_with(".pdf") {
-                match tokio::task::spawn_blocking(move || parser::parse_pdf(&path)).await {
+                let path_clone = path.clone();
+                match tokio::task::spawn_blocking(move || {
+                    if let Some(inv) = ubl::parse_ubl_pdf(&path_clone) {
+                        Ok(vec![inv])
+                    } else {
+                        parser::parse_pdf(&path_clone)
+                    }
+                }).await {
                     Ok(Ok(v)) => Some(v),
                     _ => None,
                 }
@@ -338,179 +287,9 @@ async fn load_files(
 
 
 
-    // AI Fallback System for poor parse quality
-    let provider = {
-        let active = state.active_provider.lock().unwrap().clone();
-        find_provider(&state, &active)
-    };
-    let model = {
-        state.model1.lock().unwrap().clone()
-    };
-
-    let mut ai_tasks = tokio::task::JoinSet::new();
-    let ai_sem = Arc::new(Semaphore::new(3)); // limit concurrent AI requests to 3
-
-    // Loop through invoices to hit cache or queue AI tasks concurrently
-    {
-        let mut vkn_cache = state.vkn_cache.lock().unwrap();
-        let mut cache_modified = false;
-
-        for (idx, inv) in all.iter_mut().enumerate() {
-            // First check: if VKN is ASC Enerji, recipient must be ASC
-            if inv.tax_number == "0860574079" {
-                inv.recipient = "ASC ENERJİ ANONİM ŞİRKETİ".to_string();
-            }
-
-            // 1. Check if the VKN is already resolved in cache
-            if !inv.tax_number.is_empty() && inv.tax_number != "0860574079" {
-                if let Some(cached_name) = vkn_cache.get(&inv.tax_number) {
-                    let lu = inv.issuer.to_uppercase();
-                    if lu.contains("ASC ENERJİ") || lu.contains("ASC ENERJI") || lu.contains("ASC energy") {
-                        inv.recipient = cached_name.clone();
-                    } else {
-                        inv.issuer = cached_name.clone();
-                    }
-                    continue; // Skip AI fallback since we solved it!
-                }
-            }
-
-            // 2. Fallback to AI if parse quality is suspect
-            let is_poor_parse = inv.issuer.is_empty() 
-                || inv.recipient.is_empty() 
-                || inv.issuer.chars().count() < 3 
-                || inv.recipient.chars().count() < 3
-                || inv.issuer.to_uppercase() == "SAN.LTD.ŞTİ"
-                || inv.issuer.to_uppercase() == "MERKEZ NİĞDE"
-                || inv.issuer.to_uppercase().contains("IBAN")
-                || inv.issuer.to_uppercase().contains("TR51")
-                || inv.issuer.to_uppercase().contains("TR10");
-
-            if is_poor_parse {
-                if let Some(ref provider_cfg) = provider {
-                    if provider_cfg.api_key.is_empty() { continue; }
-                    // response_format json_object only works on OpenAI-compatible
-                    let is_compat = matches!(provider_cfg.name.as_str(), "deepseek" | "openai" | "openrouter" | "nvidia");
-                    if !is_compat {
-                        log::warn!("AI Fallback atlandi ({} json_object desteklemez): {}", provider_cfg.name, inv.filename);
-                        continue;
-                    }
-                    log::info!("AI Fallback kuyruğa ekleniyor (Eksik/Hatalı Parse): {}", inv.filename);
-                    
-                    let filename = inv.filename.clone();
-                    let tax_number = inv.tax_number.clone();
-                    let provider_cfg_clone = provider_cfg.clone();
-                    let model_clone = model.clone();
-                    let snippet = if inv.raw_text.len() > 2500 {
-                        inv.raw_text[..2500].to_string()
-                    } else {
-                        inv.raw_text.clone()
-                    };
-
-                    // Add a step for progress tracking
-                    total_steps.fetch_add(1, Ordering::SeqCst);
-
-                    let ai_sem_clone = ai_sem.clone();
-                    let processed_steps_clone = processed_steps.clone();
-                    let total_steps_clone = total_steps.clone();
-                    let window_clone = window.clone();
-
-                    ai_tasks.spawn(async move {
-                        let _permit = ai_sem_clone.acquire().await.unwrap();
-                        let sys = "Sen bir JSON API'sisin. Sadece JSON döndür. Örn: {\"issuer\": \"...\", \"recipient\": \"...\"}";
-                        let user = format!("Aşağıdaki faturadan Düzenleyen (satıcı/issuer) ve Alıcı (alıcı/recipient) resmi şirket adlarını bulup JSON olarak ver.\n\n\
-                             Kurallar:\n\
-                             1. Alıcı (recipient), faturada genellikle 'SAYIN', 'Sayın', 'Müşteri' veya 'Alıcı' ifadesinin hemen ardından gelen şirkettir.\n\
-                             2. Düzenleyen (issuer), faturayı kesen satıcıdır. Kesinlikle 'SAYIN' ile başlayan şirketi Düzenleyen (issuer) olarak yazma, onu Alıcı (recipient) olarak yaz.\n\n\
-                             Fatura Metni:\n{}", snippet);
-
-                        let content_res = ai::chat_completion_openai_compat(
-                            &provider_cfg_clone, &model_clone, sys, &user, true
-                        ).await;
-
-                        // Emit progress for AI task finish
-                        let current = processed_steps_clone.fetch_add(1, Ordering::SeqCst) + 1;
-                        let total = total_steps_clone.load(Ordering::SeqCst);
-                        let pct = (current * 100) / total;
-                        let _ = window_clone.emit("parse_progress", pct);
-
-                        if let Ok(content) = content_res {
-                            let clean = content.trim()
-                                .trim_start_matches("```json")
-                                .trim_end_matches("```")
-                                .trim();
-                            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(clean) {
-                                let ai_issuer = parsed["issuer"].as_str().unwrap_or_default().trim().to_string();
-                                let ai_recipient = parsed["recipient"].as_str().unwrap_or_default().trim().to_string();
-                                return Some((idx, filename, tax_number, ai_issuer, ai_recipient));
-                            }
-                        }
-                        None
-                    });
-                }
-            } else {
-                // Successful regex parse, populate cache
-                if !inv.tax_number.is_empty() && inv.tax_number != "0860574079" {
-                    let lu = inv.issuer.to_uppercase();
-                    let other_party_name = if lu.contains("ASC ENERJİ") || lu.contains("ASC ENERJI") || lu.contains("ASC energy") {
-                        &inv.recipient
-                    } else {
-                        &inv.issuer
-                    };
-                    if !other_party_name.is_empty() {
-                        vkn_cache.insert(inv.tax_number.clone(), other_party_name.clone());
-                        cache_modified = true;
-                    }
-                }
-            }
-        }
-
-        if cache_modified {
-            save_vkn_cache(&vkn_cache);
-        }
-    }
-
-    // 3. Wait for all AI tasks to complete concurrently
-    let mut resolved_ai = Vec::new();
-    while let Some(res) = ai_tasks.join_next().await {
-        if let Ok(Some(data)) = res {
-            resolved_ai.push(data);
-        }
-    }
-
-    // 4. Update the invoices and persistent database in a single short lock
-    if !resolved_ai.is_empty() {
-        let mut cache_modified = false;
-        let mut vkn_cache = state.vkn_cache.lock().unwrap();
-
-        for (idx, _filename, tax_number, ai_issuer, ai_recipient) in resolved_ai {
-            if let Some(inv) = all.get_mut(idx) {
-                if !ai_issuer.is_empty() {
-                    log::info!("AI Düzeltmesi (Düzenleyen): {} -> {}", inv.issuer, ai_issuer);
-                    inv.issuer = ai_issuer.clone();
-                }
-                if !ai_recipient.is_empty() {
-                    log::info!("AI Düzeltmesi (Alıcı): {} -> {}", inv.recipient, ai_recipient);
-                    inv.recipient = ai_recipient.clone();
-                }
-
-                // Save the other party's name to the cache (issuer or recipient)
-                if !tax_number.is_empty() && tax_number != "0860574079" {
-                    let lu = inv.issuer.to_uppercase();
-                    let other_party_name = if lu.contains("ASC ENERJİ") || lu.contains("ASC ENERJI") || lu.contains("ASC energy") {
-                        ai_recipient
-                    } else {
-                        ai_issuer
-                    };
-                    if !other_party_name.is_empty() {
-                        vkn_cache.insert(tax_number.clone(), other_party_name);
-                        cache_modified = true;
-                    }
-                }
-            }
-        }
-
-        if cache_modified {
-            save_vkn_cache(&vkn_cache);
+    for inv in all.iter_mut() {
+        if inv.tax_number == "0860574079" {
+            inv.recipient = "ASC ENERJİ ANONİM ŞİRKETİ".to_string();
         }
     }
 
@@ -549,7 +328,6 @@ fn get_filter_options(state: tauri::State<AppState>) -> FilterOptions {
     let mut issuers = std::collections::HashSet::new();
     let mut recipients = std::collections::HashSet::new();
     let mut locations = std::collections::HashSet::new();
-    let mut categories = std::collections::HashSet::new();
     let mut dates: Vec<String> = Vec::new();
 
     for inv in invoices.iter() {
@@ -566,9 +344,6 @@ fn get_filter_options(state: tauri::State<AppState>) -> FilterOptions {
         }
         if !inv.date.is_empty() {
             dates.push(inv.date.clone());
-        }
-        if !inv.category.is_empty() {
-            categories.insert(inv.category.clone());
         }
     }
 
@@ -596,11 +371,6 @@ fn get_filter_options(state: tauri::State<AppState>) -> FilterOptions {
         date_max,
         amount_min: 0.0,
         amount_max: 0.0,
-        categories: {
-            let mut v: Vec<_> = categories.into_iter().collect();
-            v.sort();
-            v
-        },
     }
 }
 
@@ -637,11 +407,16 @@ fn organize_folders(
     criteria: FilterCriteria,
     group_by: String,
     output_dir: String,
+    selected_ids: Option<Vec<String>>,
+    copy_only: Option<bool>,
 ) -> Result<usize, String> {
     let invoices = state.invoices.lock().unwrap();
-    let filtered = filter::filter_invoices(&invoices, &criteria);
+    let mut filtered = filter::filter_invoices(&invoices, &criteria);
+    if let Some(ref ids) = selected_ids {
+        filtered.retain(|inv| ids.contains(&inv.id));
+    }
     let groups = filter::group_and_sort(&filtered, &group_by);
-    folder::organize_into_folders(&groups, &output_dir)
+    folder::organize_into_folders(&groups, &output_dir, copy_only.unwrap_or(false))
 }
 
 #[tauri::command]
@@ -651,11 +426,16 @@ fn organize_hierarchy(
     parent_group: String,
     child_group: String,
     output_dir: String,
+    selected_ids: Option<Vec<String>>,
+    copy_only: Option<bool>,
 ) -> Result<usize, String> {
     let invoices = state.invoices.lock().unwrap();
-    let filtered = filter::filter_invoices(&invoices, &criteria);
+    let mut filtered = filter::filter_invoices(&invoices, &criteria);
+    if let Some(ref ids) = selected_ids {
+        filtered.retain(|inv| ids.contains(&inv.id));
+    }
     let groups = filter::group_and_sort(&filtered, &parent_group);
-    folder::organize_into_hierarchy(&groups, &output_dir, &child_group)
+    folder::organize_into_hierarchy(&groups, &output_dir, &child_group, copy_only.unwrap_or(false))
 }
 
 fn find_provider(state: &AppState, name: &str) -> Option<ProviderConfig> {
@@ -790,31 +570,7 @@ async fn ai_filter(
         find_provider(&state, &active)
     };
 
-    let filtered: Vec<Invoice> = if let Some(engine) = embedding::EmbeddingEngine::get() {
-        let mut indexed: Vec<(Vec<f32>, usize, String)> = Vec::new();
-        for (i, inv) in invoices.iter().enumerate().take(200) {
-            if let Some(ref emb) = inv.embedding {
-                indexed.push((emb.clone(), i, inv.id.clone()));
-            } else {
-                let text = format!("{} {} {} {}", inv.issuer, inv.recipient, inv.category, inv.description);
-                if let Ok(emb) = engine.embed(text.trim()) {
-                    indexed.push((emb, i, inv.id.clone()));
-                }
-            }
-        }
-        let targets: Vec<(Vec<f32>, usize)> = indexed.iter()
-            .map(|(emb, idx, _)| (emb.clone(), *idx))
-            .collect();
-        if !targets.is_empty() {
-            let matches = embedding::search_similar(&query, &targets, 50);
-            let matched_ids: std::collections::HashSet<String> = matches.iter()
-                .map(|(idx, _)| invoices[*idx].id.clone())
-                .collect();
-            invoices.iter().filter(|inv| matched_ids.contains(&inv.id)).cloned().collect()
-        } else {
-            vec![]
-        }
-    } else {
+    let filtered: Vec<Invoice> = {
         let q = query.to_lowercase();
         invoices.iter()
             .filter(|inv| {
@@ -833,7 +589,7 @@ async fn ai_filter(
                 issuers: vec![], recipients: vec![], locations: vec![],
                 date_min: String::new(), date_max: String::new(),
                 amount_min: 0.0, amount_max: 0.0,
-                search_text: query.clone(), categories: vec![],
+                search_text: query.clone(),
             },
             group_by: "issuer".to_string(),
             explanation: "Eslestirme yapilamadi. Manuel filtreleme deneyin.".to_string(),
@@ -853,7 +609,7 @@ async fn ai_filter(
             issuers: vec![], recipients: vec![], locations: vec![],
             date_min: String::new(), date_max: String::new(),
             amount_min: 0.0, amount_max: 0.0,
-            search_text: query.clone(), categories: vec![],
+            search_text: query.clone(),
         },
         group_by: "issuer".to_string(),
         explanation: format!("{} fatura bulundu.", filtered.len()),
@@ -935,10 +691,7 @@ async fn fix_invoice_with_ai(state: tauri::State<'_, AppState>, id: String) -> R
 
         let content = ai::chat_completion_openai_compat(&provider, &model, sys, &user, true).await?;
 
-        let clean = content.trim()
-            .trim_start_matches("```json")
-            .trim_end_matches("```")
-            .trim();
+        let clean = crate::ai::clean_json(&content);
 
         let parsed = serde_json::from_str::<serde_json::Value>(clean)
             .map_err(|e| format!("JSON ayrıştırma hatası: {}", e))?;
@@ -954,19 +707,7 @@ async fn fix_invoice_with_ai(state: tauri::State<'_, AppState>, id: String) -> R
         }
         
         // Save to cache
-        if !inv.tax_number.is_empty() && inv.tax_number != "0860574079" {
-            let mut vkn_cache = state.vkn_cache.lock().unwrap();
-            let lu = inv.issuer.to_uppercase();
-            let other_party_name = if lu.contains("ASC ENERJİ") || lu.contains("ASC ENERJI") || lu.contains("ASC energy") {
-                &inv.recipient
-            } else {
-                &inv.issuer
-            };
-            if !other_party_name.is_empty() {
-                vkn_cache.insert(inv.tax_number.clone(), other_party_name.clone());
-                save_vkn_cache(&vkn_cache);
-            }
-        }
+
         
         // Update in state
         let mut invoices = state.invoices.lock().unwrap();
@@ -974,14 +715,6 @@ async fn fix_invoice_with_ai(state: tauri::State<'_, AppState>, id: String) -> R
             existing.issuer = inv.issuer.clone();
             existing.recipient = inv.recipient.clone();
 
-            // Recalculate embedding since fields changed
-            if let Some(engine) = embedding::EmbeddingEngine::get() {
-                let text = format!("{} {} {} {}", existing.issuer, existing.recipient, existing.category, existing.description);
-                if let Ok(emb) = engine.embed(&text) {
-                    existing.embedding = Some(emb.clone());
-                    inv.embedding = Some(emb);
-                }
-            }
         }
 
         // Update parse cache and save
@@ -992,7 +725,6 @@ async fn fix_invoice_with_ai(state: tauri::State<'_, AppState>, id: String) -> R
                 if ci.filename == inv.filename {
                     ci.issuer = inv.issuer.clone();
                     ci.recipient = inv.recipient.clone();
-                    ci.embedding = inv.embedding.clone();
                 }
             }
         }
@@ -1012,41 +744,11 @@ fn clear_invoices(state: tauri::State<AppState>) {
 
 #[tauri::command]
 fn update_invoice_category(
-    state: tauri::State<AppState>,
-    id: String,
-    new_category: String
+    _state: tauri::State<AppState>,
+    _id: String,
+    _new_category: String
 ) -> Result<(), String> {
-    let mut invoices = state.invoices.lock().unwrap();
-    if let Some(inv) = invoices.iter_mut().find(|i| i.id == id) {
-        inv.category = new_category.clone();
-        
-        if let Some(engine) = embedding::EmbeddingEngine::get() {
-            let text = format!("{} {} {} {}", inv.issuer, inv.recipient, inv.category, inv.description);
-            if let Ok(emb) = engine.embed(&text) {
-                inv.embedding = Some(emb.clone());
-                crate::memory::add_trained_vector(new_category, emb);
-            }
-        } else if let Some(emb) = &inv.embedding {
-            crate::memory::add_trained_vector(new_category, emb.clone());
-        }
-
-        // Update parse cache and save
-        let path_key = get_file_cache_key(&inv.full_path);
-        let mut cache = state.parse_cache.lock().unwrap();
-        if let Some(cache_invs) = cache.get_mut(&path_key) {
-            for ci in cache_invs {
-                if ci.filename == inv.filename {
-                    ci.category = inv.category.clone();
-                    ci.embedding = inv.embedding.clone();
-                }
-            }
-        }
-        save_parse_cache(&cache);
-        
-        Ok(())
-    } else {
-        Err("Fatura bulunamadı.".into())
-    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1092,14 +794,13 @@ async fn deep_analyze(
                 &inv.raw_text
             };
             format!(
-                "[{}] Dosya: {} | Düzenleyen: {} | Alıcı: {} | Tutar: {:.2} TL | Tarih: {} | Kategori: {}\n---\n{}\n",
+                "[{}] Dosya: {} | Düzenleyen: {} | Alıcı: {} | Tutar: {:.2} TL | Tarih: {}\n---\n{}\n",
                 i + 1,
                 inv.filename,
                 inv.issuer,
                 inv.recipient,
                 inv.amount,
                 inv.date,
-                inv.category,
                 raw_snippet
             )
         })
@@ -1109,8 +810,6 @@ async fn deep_analyze(
 
     let system_prompt = "Sen bir fatura analiz uzmanısın. Sana numaralandırılmış faturalar ve içerikleri verilecek. \
         Kullanıcının sorusunu doğru ve eksiksiz yanıtla. \
-        ÖNEMLİ: Faturalardaki Kategori alanları otomatik atanmış olup doğruluk seviyeleri düşüktür ve güvenilir değildir. \
-        Kategorilere güvenmek yerine fatura içeriğindeki (raw_text) asıl ürün, hizmet ve açıklama metinlerine dayanarak karar ver. \
         Ürün/hizmet adetleri, tutarlar, tedarikçiler gibi detayları fatura içeriğinden okuyarak hesapla. \
         ÖNEMLİ: Eşleşen faturaları açıklama (explanation) metninde tek tek sıra halinde veya liste olarak yazarak kalabalık etme. Arayüz bu faturaları zaten otomatik olarak filtreleyip gösterecektir. Açıklama metninde sadece genel analiz, toplam adet/tutar bilgisi ve gerekiyorsa markdown tablosu olarak özet rapor sun. \
         Yanıtını SADECE şu JSON formatında ver (başka hiçbir şey yazma, kod bloğu kullanma):\
@@ -1131,20 +830,14 @@ async fn deep_analyze(
         _ => ai::chat_completion_openai_compat(&provider, &model, system_prompt, &user_prompt, false).await?,
     };
 
-    // JSON bloğu varsa temizle
-    let clean = {
-        let t = content.trim();
-        if t.starts_with("```") {
-            let end = t.find('\n').unwrap_or(0);
-            let tail = t.rfind("```").unwrap_or(t.len());
-            t[end..tail].trim()
-        } else {
-            t
-        }
-    };
+    let clean = crate::ai::clean_json(&content);
 
     let parsed: serde_json::Value = serde_json::from_str(clean)
         .map_err(|e| format!("AI yanıtı parse hatası: {} | Ham: {}", e, clean))?;
+
+    log::info!("deep_analyze - Raw content: {}", content);
+    log::info!("deep_analyze - Cleaned JSON: {}", clean);
+    log::info!("deep_analyze - Parsed matched_indices: {:?}", parsed["matched_indices"]);
 
     let explanation = parsed["explanation"].as_str().unwrap_or("").to_string();
 
@@ -1160,47 +853,19 @@ async fn deep_analyze(
         })
         .collect();
 
+    log::info!("deep_analyze - Resulting matched_ids (count {}): {:?}", matched_ids.len(), matched_ids);
+
     Ok(DeepAnalyzeResponse { explanation, matched_ids })
 }
 
 #[tauri::command]
 fn is_model_ready() -> bool {
-    embedding::EmbeddingEngine::get().is_some()
+    true
 }
 
 #[tauri::command]
-async fn sync_cache_to_memory(state: tauri::State<'_, AppState>) -> Result<usize, String> {
-    let cache = state.parse_cache.lock().unwrap().clone();
-    let engine = embedding::EmbeddingEngine::get().ok_or("Embedding motoru hazır değil.")?;
-    
-    let mut to_train = Vec::new();
-    for (_key, invs) in cache {
-        for inv in invs {
-            if !inv.category.is_empty() && inv.category != "Diğer" {
-                let emb = if let Some(e) = inv.embedding {
-                    e
-                } else {
-                    let text = format!("{} {} {} {}", inv.issuer, inv.recipient, inv.category, inv.description);
-                    match engine.embed(&text) {
-                        Ok(e) => e,
-                        Err(_) => continue,
-                    }
-                };
-                
-                to_train.push(crate::memory::TrainedVector {
-                    category: inv.category.clone(),
-                    embedding: emb,
-                });
-            }
-        }
-    }
-    
-    let count = to_train.len();
-    if count > 0 {
-        crate::memory::add_trained_vectors_bulk(to_train);
-    }
-    
-    Ok(count)
+async fn sync_cache_to_memory(_state: tauri::State<'_, AppState>) -> Result<usize, String> {
+    Ok(0)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1226,56 +891,13 @@ pub fn run() {
                 active_provider: Mutex::new(cfg.active_provider),
                 model1: Mutex::new(cfg.model1),
                 model2: Mutex::new(cfg.model2),
-                vkn_cache: Mutex::new(load_vkn_cache()),
                 parse_cache: Mutex::new(load_parse_cache()),
                 models_dir: Mutex::new(get_app_dir().join("models").to_string_lossy().to_string()),
             });
 
-            // Initialize memory
-            memory::load_trained_memory();
-
-            // ort::init() ana thread'de çağrılmalı — Windows loader lock nedeniyle
-            // arka thread'den çağrılırsa UI bloklanıyor
-            if ort::init().commit() {
-                log::info!("ONNX Runtime yuklendi");
-            } else {
-                log::error!("ONNX Runtime yuklenemedi");
-            }
-
             let app_handle = app.handle().clone();
-            
-            // Sadece ağır model yüklemesi arka thread'de
             std::thread::spawn(move || {
-                let models_dir = get_app_dir().join("models");
-                let _ = std::fs::create_dir_all(&models_dir);
-                let model_path = models_dir.join("model.onnx");
-                let tokenizer_path = models_dir.join("tokenizer.json");
-
-                // Auto-download model if missing
-                if !model_path.exists() || !tokenizer_path.exists() {
-                    log::info!("Model dosyalari eksik, HuggingFace'ten indiriliyor...");
-                    let _ = app_handle.emit("model_loading_status", "Model indiriliyor: Xenova/paraphrase-multilingual-MiniLM-L12-v2 (~118MB)...");
-                    match download_model_files(&models_dir) {
-                        Ok(()) => log::info!("Model dosyalari indirildi"),
-                        Err(e) => log::error!("Model indirme hatasi: {}", e),
-                    }
-                }
-
-                if model_path.exists() && tokenizer_path.exists() {
-                    let _ = app_handle.emit("model_loading_status", "Model yükleniyor (Belleğe alınıyor)...");
-                    match embedding::EmbeddingEngine::init(
-                        &model_path.to_string_lossy(),
-                        &tokenizer_path.to_string_lossy(),
-                    ) {
-                        Ok(()) => {
-                            log::info!("Embedding engine baslatildi");
-                            let _ = app_handle.emit("model_ready", ());
-                        },
-                        Err(e) => log::error!("Embedding engine baslatilamadi: {}", e),
-                    }
-                } else {
-                    log::warn!("Model dosyalari bulunamadi: {}", models_dir.display());
-                }
+                let _ = app_handle.emit("model_ready", ());
             });
 
             Ok(())

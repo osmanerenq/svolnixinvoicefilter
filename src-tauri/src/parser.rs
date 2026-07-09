@@ -4,8 +4,67 @@ use pdf_extract::extract_text;
 use regex::Regex;
 use std::path::Path;
 
-use crate::embedding::{cosine_similarity, EmbeddingEngine};
+
 use crate::types::Invoice;
+
+pub fn parse_amount(s: &str) -> f64 {
+    let clean: String = s.chars()
+        .filter(|&c| c.is_ascii_digit() || c == '.' || c == ',')
+        .collect();
+    let clean = clean.trim();
+    if clean.is_empty() {
+        return 0.0;
+    }
+
+    let mut clean = clean.to_string();
+    if clean.starts_with('.') || clean.starts_with(',') {
+        clean.remove(0);
+    }
+    if clean.ends_with('.') || clean.ends_with(',') {
+        clean.pop();
+    }
+
+    let dots = clean.chars().filter(|&c| c == '.').count();
+    let commas = clean.chars().filter(|&c| c == ',').count();
+
+    if dots > 0 && commas > 0 {
+        let dot_idx = clean.rfind('.').unwrap();
+        let comma_idx = clean.rfind(',').unwrap();
+        if dot_idx > comma_idx {
+            clean.replace(',', "").parse::<f64>().unwrap_or(0.0)
+        } else {
+            clean.replace('.', "").replace(',', ".").parse::<f64>().unwrap_or(0.0)
+        }
+    } else if commas > 0 {
+        if commas == 1 {
+            let comma_idx = clean.find(',').unwrap();
+            let decimals = clean.len() - 1 - comma_idx;
+            if decimals == 2 {
+                clean.replace(',', ".").parse::<f64>().unwrap_or(0.0)
+            } else {
+                clean.replace(',', "").parse::<f64>().unwrap_or(0.0)
+            }
+        } else {
+            clean.replace(',', "").parse::<f64>().unwrap_or(0.0)
+        }
+    } else {
+        if dots > 1 {
+            clean.replace('.', "").parse::<f64>().unwrap_or(0.0)
+        } else {
+            if dots == 1 {
+                let dot_idx = clean.find('.').unwrap();
+                let decimals = clean.len() - 1 - dot_idx;
+                if decimals == 3 {
+                    clean.replace('.', "").parse::<f64>().unwrap_or(0.0)
+                } else {
+                    clean.parse::<f64>().unwrap_or(0.0)
+                }
+            } else {
+                clean.parse::<f64>().unwrap_or(0.0)
+            }
+        }
+    }
+}
 
 pub fn parse_pdf(path: &str) -> Result<Vec<Invoice>, String> {
     let text = extract_text(path).map_err(|e| format!("PDF okunamadı: {}", e))?;
@@ -33,9 +92,8 @@ pub fn parse_pdf(path: &str) -> Result<Vec<Invoice>, String> {
             .collect()
     };
 
-    // Turkish number format: 26.844,48 → 26844.48
     let parse_tr_amount = |s: &str| -> f64 {
-        s.replace('.', "").replace(',', ".").trim().parse::<f64>().unwrap_or(0.0)
+        parse_amount(s)
     };
 
     // Date: dd.mm.yyyy or dd/mm/yyyy or dd-mm-yyyy, also spaced: "26- 02- 2026"
@@ -72,22 +130,31 @@ pub fn parse_pdf(path: &str) -> Result<Vec<Invoice>, String> {
         .or_else(|| date_re.captures(&text).map(|c| normalize_date(&c[1])))
         .unwrap_or_default();
 
-    let mut candidates = Vec::new();
+    let mut odenenecek_candidates = Vec::new();
     for c in odenenecek_re.captures_iter(&text) {
         let v = parse_tr_amount(&c[1]);
-        if v > 5.0 { candidates.push(v); }
+        if v > 1.0 { odenenecek_candidates.push(v); }
     }
+
+    let mut vergiler_dahil_candidates = Vec::new();
     for c in vergiler_dahil_re.captures_iter(&text) {
         let v = parse_tr_amount(&c[1]);
-        if v > 5.0 { candidates.push(v); }
+        if v > 1.0 { vergiler_dahil_candidates.push(v); }
     }
+
+    let mut toplam_candidates = Vec::new();
     for c in toplam_re.captures_iter(&text) {
         let v = parse_tr_amount(&c[1]);
-        if v > 5.0 { candidates.push(v); }
+        if v > 1.0 { toplam_candidates.push(v); }
     }
-    let amount = candidates.into_iter()
-        .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-        .unwrap_or(0.0);
+
+    let amount = if !odenenecek_candidates.is_empty() {
+        *odenenecek_candidates.iter().max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)).unwrap_or(&0.0)
+    } else if !vergiler_dahil_candidates.is_empty() {
+        *vergiler_dahil_candidates.iter().max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)).unwrap_or(&0.0)
+    } else {
+        *toplam_candidates.iter().max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)).unwrap_or(&0.0)
+    };
 
     let invoice_number = invoice_no_re.captures(&text).map(|c| c[1].to_string()).unwrap_or_default();
 
@@ -425,17 +492,55 @@ pub fn parse_pdf(path: &str) -> Result<Vec<Invoice>, String> {
         }
     }
 
+    // Swap issuer/recipient if SAYIN explicitly indicates a different recipient
+    let sayin_idx = lines.iter().position(|l| {
+        let up = l.to_uppercase().trim().to_string();
+        up == "SAYIN" || up == "SAYIN:" || up.starts_with("SAYIN ") || up.starts_with("SAYIN:")
+    });
+    if let Some(si) = sayin_idx {
+        let sayin_line = lines[si];
+        let up = sayin_line.to_uppercase().trim().to_string();
+        let target = if up == "SAYIN" || up == "SAYIN:" {
+            lines.get(si + 1).map(|s| s.to_string()).unwrap_or_default()
+        } else {
+            let stripped = sayin_line.trim();
+            if let Some(idx) = stripped.to_uppercase().find("SAYIN") {
+                stripped[idx + 5..].trim().trim_start_matches(':').trim().to_string()
+            } else {
+                stripped.to_string()
+            }
+        };
+        let target_lu = target.to_uppercase();
+        if !target_lu.is_empty() {
+            let issuer_lu = issuer.to_uppercase();
+            if !issuer_lu.is_empty() && (issuer_lu.contains(&target_lu) || target_lu.contains(&issuer_lu)) {
+                let temp = issuer;
+                issuer = recipient;
+                recipient = temp;
+            }
+        }
+    }
+
     // Fallbacks if one is still empty:
     if issuer.is_empty() {
-        issuer = other_candidates.iter()
-            .find(|c| **c != recipient)
-            .cloned()
-            .unwrap_or_default();
+        if !recipient.to_uppercase().contains("ASC ENERJİ") && !recipient.to_uppercase().contains("ASC ENERJI") && !recipient.to_uppercase().contains("ASC ENERGY") {
+            issuer = asc_candidates.first().cloned().unwrap_or_else(|| "ASC ENERJİ ANONİM ŞİRKETİ".to_string());
+        } else {
+            issuer = other_candidates.iter()
+                .find(|c| **c != recipient)
+                .cloned()
+                .unwrap_or_default();
+        }
     }
     if recipient.is_empty() {
-        recipient = asc_candidates.first().cloned().unwrap_or_else(|| {
-            "ASC ENERJİ ANONİM ŞİRKETİ".to_string()
-        });
+        if !issuer.to_uppercase().contains("ASC ENERJİ") && !issuer.to_uppercase().contains("ASC ENERJI") && !issuer.to_uppercase().contains("ASC ENERGY") {
+            recipient = asc_candidates.first().cloned().unwrap_or_else(|| "ASC ENERJİ ANONİM ŞİRKETİ".to_string());
+        } else {
+            recipient = other_candidates.iter()
+                .find(|c| **c != issuer)
+                .cloned()
+                .unwrap_or_default();
+        }
     }
 
     // Clean up results
@@ -483,7 +588,7 @@ pub fn parse_pdf(path: &str) -> Result<Vec<Invoice>, String> {
 
     info!("PDF parsed: issuer={:?} recipient={:?} amount={} date={:?}", issuer, recipient, amount, date);
 
-    let mut invoice = Invoice {
+    let invoice = Invoice {
         id,
         filename,
         full_path: path.to_string(),
@@ -496,186 +601,12 @@ pub fn parse_pdf(path: &str) -> Result<Vec<Invoice>, String> {
         tax_number,
         description,
         raw_text: full,
-        embedding: None,
-        category: String::new(),
         ai_parsed: false,
     };
-    validate_with_embedding(&mut invoice);
     Ok(vec![invoice])
 }
 
-pub(crate) fn find_best_field(lines: &[&str], prototype: &str) -> Option<String> {
-    let engine = EmbeddingEngine::get()?;
-    let proto_emb = engine.embed(prototype).ok()?;
 
-    let mut best_line: Option<&str> = None;
-    let mut best_score: f32 = 0.4;
-
-    for line in lines {
-        let l = line.trim();
-        if l.is_empty() {
-            continue;
-        }
-        let lower = l.to_lowercase();
-        if l.len() < 4 {
-            continue;
-        }
-        if l.chars().all(|c| c.is_ascii_digit() || c == ' ' || c == '.' || c == ',') {
-            continue;
-        }
-        if lower.contains("iban")
-            || lower.contains("http")
-            || lower.contains("@")
-        {
-            continue;
-        }
-        if lower.contains("cadde")
-            || lower.contains("sokak")
-            || lower.contains("mahalle")
-            || lower.contains("bulvar")
-            || lower.contains("cad.")
-            || lower.contains("sk.")
-            || lower.contains("mah.")
-        {
-            continue;
-        }
-        let line_emb = match engine.embed(l) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let sim = cosine_similarity(&proto_emb, &line_emb);
-        if sim > best_score {
-            best_score = sim;
-            best_line = Some(l);
-        }
-    }
-    best_line.map(|s| s.to_string())
-}
-
-pub(crate) fn validate_with_embedding(invoice: &mut Invoice) {
-    if EmbeddingEngine::get().is_none() {
-        return;
-    }
-
-    let text = &invoice.raw_text;
-    // ponytail: doc embedding computed per spec, unused for now — future combined similarity
-    let doc_text: String = text.chars().take(1000).collect();
-    let engine = EmbeddingEngine::get().unwrap();
-    let _doc_emb = engine.embed(&doc_text).ok();
-
-    let lines: Vec<&str> = text
-        .lines()
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty())
-        .collect();
-
-    let count_digits = |s: &str| -> usize { s.chars().filter(|c| c.is_ascii_digit()).count() };
-
-    // Issuer
-    let issuer_bad = invoice.issuer.is_empty()
-        || invoice.issuer.len() < 4
-        || invoice.issuer.to_lowercase().contains("iban")
-        || count_digits(&invoice.issuer) > 5;
-    if issuer_bad {
-        if let Some(better) =
-            find_best_field(&lines, "sirket adi düzenleyen firma satıcı")
-        {
-            invoice.issuer = better;
-        }
-    }
-
-    // Recipient
-    let recipient_bad = invoice.recipient.is_empty()
-        || invoice.recipient.len() < 4
-        || invoice.recipient.to_lowercase().contains("iban")
-        || count_digits(&invoice.recipient) > 5;
-    if recipient_bad {
-        if let Some(better) = find_best_field(&lines, "alici musteri recipient") {
-            invoice.recipient = better;
-        }
-    }
-
-    // Amount
-    if invoice.amount < 0.01 {
-        if let Some(better) =
-            find_best_field(&lines, "toplam tutar odeme miktari")
-        {
-            let cleaned = better.replace('.', "").replace(',', ".").trim().to_string();
-            if let Ok(v) = cleaned.parse::<f64>() {
-                if v > 1.0 {
-                    invoice.amount = v;
-                }
-            }
-        }
-    }
-
-    // Date
-    if invoice.date.is_empty() {
-        if let Some(better) =
-            find_best_field(&lines, "tarih fatura kesim duzenlenme")
-        {
-            let date_re =
-                Regex::new(r"(\d{2}\s*[.\-/]\s*\d{2}\s*[.\-/]\s*\d{4})").unwrap();
-            if let Some(caps) = date_re.captures(&better) {
-                invoice.date = caps[1]
-                    .to_string()
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join("");
-            }
-        }
-    }
-
-    // Location
-    if invoice.location.is_empty() || invoice.location.len() < 3 {
-        if let Some(better) = find_best_field(&lines, "sehir il konum adres") {
-            invoice.location = better;
-        }
-    }
-
-    // Category (Memory + Zero-shot fallback)
-    if invoice.category.is_empty() {
-        let text_to_embed = format!("{} {}", invoice.issuer, invoice.description);
-        
-        if let Ok(text_emb) = engine.embed(&text_to_embed) {
-            invoice.embedding = Some(text_emb.clone()); // Vektörü kaydet
-            
-            // 1. Önce kullanıcının eğittiği KNN (Vektör Hafızası) belleğine bak.
-            // threshold = 0.82 (çok benzerse al)
-            if let Some(learned_cat) = crate::memory::find_best_match(&text_emb, 0.82) {
-                invoice.category = learned_cat;
-            } else {
-                // 2. Hafızada yoksa Zero-shot AI tahmini yap
-                let categories = [
-                    "Demirbaş", "Hizmet", "Yemek", "Ulaşım", "Konaklama", "Market", 
-                    "Kırtasiye", "Teknoloji", "Kargo", "Yazılım", "Danışmanlık", 
-                    "Temizlik", "Sarf Malzeme", "Hırdavat", "Mobilya", "Sağlık", 
-                    "Güvenlik", "Elektrik", "Su", "Doğalgaz", "Akaryakıt", "Diğer"
-                ];
-                let mut best_cat = "";
-                let mut best_cat_score = 0.0;
-
-                for cat in categories.iter() {
-                    if let Ok(cat_emb) = engine.embed(cat) {
-                        let sim = cosine_similarity(&text_emb, &cat_emb);
-                        if sim > best_cat_score {
-                            best_cat_score = sim;
-                            best_cat = cat;
-                        }
-                    }
-                }
-
-                if best_cat_score > 0.25 {
-                    invoice.category = best_cat.to_string();
-                } else {
-                    invoice.category = "Diğer".to_string();
-                }
-            }
-        } else {
-            invoice.category = "Diğer".to_string();
-        }
-    }
-}
 
 pub fn parse_excel(path: &str) -> Result<Vec<Invoice>, String> {
     let mut workbook: Xlsx<_> = open_workbook(path).map_err(|e| format!("Excel açılamadı: {}", e))?;
@@ -737,8 +668,6 @@ pub fn parse_excel(path: &str) -> Result<Vec<Invoice>, String> {
                     tax_number: get(i_tax),
                     description: get(i_desc),
                     raw_text,
-                    embedding: None,
-                    category: String::new(),
                     ai_parsed: false,
                 });
             }
