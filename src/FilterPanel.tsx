@@ -3,7 +3,7 @@ import { useStore } from './store';
 import { Filter, Search, Folders, ChevronDown, ChevronUp, SlidersHorizontal, MessageSquare, FolderOpen, Microscope, X, Info } from 'lucide-react';
 import { PROVIDERS } from './types';
 import type { Invoice } from './types';
-import { open } from '@tauri-apps/plugin-dialog';
+import { open, save } from '@tauri-apps/plugin-dialog';
 
 const computeTargetPath = (
   inv: Invoice,
@@ -57,7 +57,7 @@ export default function FilterPanel() {
     filterOptions, criteria, filtered, invoices,
     setCriteria, applyFilter, applyGroup, toggleIssuer, toggleRecipient, toggleLocation,
     organizeFolders, organizeHierarchy, aiFilterAndGroup, aiFilter, aiChat, model1, model2, deepAnalyze, deepAnalysisChat,
-    availableModels, activeProvider, clearDeepAnalysisFilter, refreshOptions,
+    availableModels, activeProvider, clearDeepAnalysis, clearDeepAnalysisFilter, refreshOptions,
   } = useStore();
 
   const [groupBy, setGroupBy] = useState('issuer');
@@ -611,21 +611,31 @@ export default function FilterPanel() {
               <Microscope className="w-4 h-4" /> Gelişmiş İnceleme
               <span className="text-xs text-gray-500 font-normal">— raw fatura içeriği üzerinden serbest soru</span>
             </h3>
-            <select
-              value={deepModel}
-              onChange={(e) => setDeepModel(e.target.value)}
-              className="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-xs text-purple-200"
-            >
-              {availableModels.length > 0
-                ? availableModels.map((m) => (
-                    <option key={m} value={m}>{m}</option>
-                  ))
-                : <>
-                    <option value={model1}>{model1} (Hızlı)</option>
-                    <option value={model2}>{model2} (Akıllı)</option>
-                  </>
-              }
-            </select>
+            <div className="flex items-center gap-2">
+              {deepAnalysisChat.messages.length > 0 && (
+                <button
+                  onClick={() => clearDeepAnalysis()}
+                  className="bg-red-950/40 hover:bg-red-900/60 border border-red-800/40 text-red-200 text-xs px-2.5 py-1 rounded-lg"
+                >
+                  Sohbeti Temizle
+                </button>
+              )}
+              <select
+                value={deepModel}
+                onChange={(e) => setDeepModel(e.target.value)}
+                className="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-xs text-purple-200"
+              >
+                {availableModels.length > 0
+                  ? availableModels.map((m) => (
+                      <option key={m} value={m}>{m}</option>
+                    ))
+                  : <>
+                      <option value={model1}>{model1} (Hızlı)</option>
+                      <option value={model2}>{model2} (Akıllı)</option>
+                    </>
+                }
+              </select>
+            </div>
           </div>
 
           {/* 300+ uyarı */}
@@ -636,55 +646,118 @@ export default function FilterPanel() {
             </div>
           )}
 
+          {/* Chat message stream */}
+          {deepAnalysisChat.messages.length > 0 && (
+            <div className="space-y-3 max-h-96 overflow-y-auto p-2 bg-gray-950/40 rounded-lg border border-gray-800">
+              {deepAnalysisChat.messages.map((msg, i) => (
+                <div
+                  key={i}
+                  className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}
+                >
+                  <span className="text-[10px] text-gray-500 mb-1 px-1">
+                    {msg.role === 'user' ? 'Kullanıcı' : 'Yapay Zeka'}
+                  </span>
+                  <div
+                    className={`max-w-[85%] rounded-lg p-3 text-sm ${
+                      msg.role === 'user'
+                        ? 'bg-purple-900/40 border border-purple-800/40 text-purple-100'
+                        : 'bg-gray-800/80 border border-gray-700/50 text-gray-200'
+                    }`}
+                  >
+                    <MarkdownFormatter text={msg.content} />
+                  </div>
+                </div>
+              ))}
+              
+              {/* Spinner if loading */}
+              {deepAnalysisChat.loading && (
+                <div className="flex items-center gap-2 text-xs text-purple-400 animate-pulse py-2 px-1">
+                  <span>🔍</span> Analiz ediliyor ve taranıyor...
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Action buttons like Download Excel */}
+          {deepAnalysisChat.excelData && !deepAnalysisChat.loading && (
+            <div className="flex flex-col items-center justify-center p-4 bg-purple-950/30 border border-purple-800/50 rounded-lg space-y-2 animate-fade-in">
+              <div className="text-center">
+                <span className="text-lg">📊</span>
+                <h4 className="text-sm font-semibold text-purple-200 mt-1">Excel Tablosu Hazır!</h4>
+                <p className="text-xs text-purple-400">"{deepAnalysisChat.excelData.sheet_name}" başlıklı excel şablonu oluşturuldu.</p>
+              </div>
+              <button
+                onClick={async () => {
+                  if (!deepAnalysisChat.excelData) return;
+                  const { invoke } = await import('@tauri-apps/api/core');
+                  try {
+                    const savePath = await save({
+                      filters: [{ name: 'Excel Tablosu', extensions: ['xlsx'] }],
+                      defaultPath: `${deepAnalysisChat.excelData.sheet_name}.xlsx`
+                    });
+                    if (savePath) {
+                      await invoke('save_excel_file', { path: savePath, excelData: deepAnalysisChat.excelData });
+                      alert(`Excel dosyası başarıyla kaydedildi:\n${savePath}`);
+                    }
+                  } catch (err) {
+                    alert(`Kaydetme hatası: ${err}`);
+                  }
+                }}
+                className="bg-green-600 hover:bg-green-500 text-white font-medium text-sm px-5 py-2 rounded-lg flex items-center gap-2 shadow-lg shadow-green-900/30 transition-all cursor-pointer"
+              >
+                📥 Excel Dosyasını İndir (.xlsx)
+              </button>
+            </div>
+          )}
+
+          {/* Grid matched status */}
+          {deepAnalysisChat.matchedIds.length > 0 && !deepAnalysisChat.loading && (
+            <div className="flex items-center justify-between text-xs text-purple-300 bg-purple-950/30 border border-purple-800/40 rounded-lg px-3 py-1.5 animate-fade-in">
+              <div className="flex items-center gap-2">
+                <span>📋</span>
+                <span>Grid <strong className="text-purple-200">{deepAnalysisChat.matchedIds.length}</strong> ilgili faturaya filtrelendi</span>
+              </div>
+              <button
+                onClick={clearDeepAnalysisFilter}
+                className="text-purple-400 hover:text-purple-200 font-semibold"
+              >
+                Filtreyi Kaldır
+              </button>
+            </div>
+          )}
+
+          {/* Query input field */}
           <div className="flex gap-2">
             <input
               type="text"
-              placeholder='Örn: "kaç tane bilgisayar alındı?", "demirbaş alımları hangi tedarikçilerden?", "en yüksek tutarlı 5 fatura"'
+              placeholder={
+                deepAnalysisChat.messages.length > 0
+                  ? "Sohbete devam edin veya soruları yanıtlayın..."
+                  : 'Örn: "kaç tane bilgisayar alındı?", "en yüksek tutarlı 5 fatura için excel dosyası yap"'
+              }
               value={deepQuery}
               onChange={(e) => setDeepQuery(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && deepQuery.trim() && !deepAnalysisChat.loading) {
                   deepAnalyze(deepQuery.trim(), deepModel);
+                  setDeepQuery('');
                 }
               }}
-              className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-gray-200 placeholder-gray-600"
+              className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-purple-500"
             />
             <button
-              onClick={() => { if (deepQuery.trim()) deepAnalyze(deepQuery.trim(), deepModel); }}
+              onClick={() => {
+                if (deepQuery.trim()) {
+                  deepAnalyze(deepQuery.trim(), deepModel);
+                  setDeepQuery('');
+                }
+              }}
               disabled={deepAnalysisChat.loading || !deepQuery.trim()}
-              className="bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white text-sm px-4 py-1.5 rounded-lg whitespace-nowrap"
+              className="bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white text-sm px-4 py-1.5 rounded-lg whitespace-nowrap cursor-pointer"
             >
-              {deepAnalysisChat.loading ? 'Analiz ediliyor...' : 'Analiz Et'}
+              {deepAnalysisChat.loading ? 'Gönderiliyor...' : 'Gönder'}
             </button>
           </div>
-
-          {deepAnalysisChat.loading && (
-            <div className="flex items-center gap-2 text-xs text-purple-400 animate-pulse">
-              <span>🔍</span> {Math.min(invoices.length, 300)} faturanın içeriği taranıyor...
-            </div>
-          )}
-
-          {deepAnalysisChat.response && !deepAnalysisChat.loading && (
-            <div className="space-y-2">
-              {deepAnalysisChat.matchedIds.length > 0 && (
-                <div className="flex items-center justify-between text-xs text-purple-300 bg-purple-950/30 border border-purple-800/40 rounded-lg px-3 py-1.5 animate-fade-in">
-                  <div className="flex items-center gap-2">
-                    <span>📋</span>
-                    <span>Grid <strong className="text-purple-200">{deepAnalysisChat.matchedIds.length}</strong> ilgili faturaya filtrelendi</span>
-                  </div>
-                  <button
-                    onClick={clearDeepAnalysisFilter}
-                    className="text-purple-400 hover:text-purple-200 font-semibold"
-                  >
-                    Filtreyi Kaldır
-                  </button>
-                </div>
-              )}
-              <div className="text-sm text-purple-100 bg-purple-950/20 border border-purple-900/30 rounded-lg p-3 max-h-96 overflow-y-auto">
-                <MarkdownFormatter text={deepAnalysisChat.response} />
-              </div>
-            </div>
-          )}
         </div>
       )}
     </div>

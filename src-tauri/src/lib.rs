@@ -25,7 +25,6 @@ struct AppState {
     model1: Mutex<String>,  // user-configurable model 1 (fast)
     model2: Mutex<String>,  // user-configurable model 2 (smart)
     parse_cache: Mutex<HashMap<String, Vec<Invoice>>>, // persistent parsing results cache
-    models_dir: Mutex<String>,
 }
 
 pub fn get_app_dir() -> PathBuf {
@@ -755,6 +754,7 @@ fn update_invoice_category(
 async fn deep_analyze(
     state: tauri::State<'_, AppState>,
     query: String,
+    history: Vec<ChatMessage>,
     model: String,
 ) -> Result<DeepAnalyzeResponse, String> {
     let provider = {
@@ -808,20 +808,38 @@ async fn deep_analyze(
 
     let all_text = snippets.join("\n========\n");
 
-    let system_prompt = "Sen bir fatura analiz uzmanısın. Sana numaralandırılmış faturalar ve içerikleri verilecek. \
-        Kullanıcının sorusunu doğru ve eksiksiz yanıtla. \
-        Ürün/hizmet adetleri, tutarlar, tedarikçiler gibi detayları fatura içeriğinden okuyarak hesapla. \
+    let mut conversation_text = String::new();
+    for msg in &history {
+        let role_label = match msg.role.to_lowercase().as_str() {
+            "user" => "Kullanıcı",
+            "assistant" => "Asistan",
+            _ => "Sistem",
+        };
+        conversation_text.push_str(&format!("{}: {}\n", role_label, msg.content));
+    }
+    conversation_text.push_str(&format!("Kullanıcı: {}\n", query));
+
+    let system_prompt = "Sen bir fatura analiz uzmanısın. Kullanıcı ile interaktif sohbet ederek faturaları analiz et ve gerekirse Excel dosyası oluştur. \
         ÖNEMLİ: Eşleşen faturaları açıklama (explanation) metninde tek tek sıra halinde veya liste olarak yazarak kalabalık etme. Arayüz bu faturaları zaten otomatik olarak filtreleyip gösterecektir. Açıklama metninde sadece genel analiz, toplam adet/tutar bilgisi ve gerekiyorsa markdown tablosu olarak özet rapor sun. \
-        Yanıtını SADECE şu JSON formatında ver (başka hiçbir şey yazma, kod bloğu kullanma):\
-        {\"explanation\": \"Markdown formatında detaylı cevap\", \"matched_indices\": [1, 5, 12]}. \
-        matched_indices: soruyla ilgili fatura numaraları (köşeli parantez içinde, [1] den başlayan). \
-        Eğer soru tüm faturalarla ilgiliyse matched_indices boş liste döndür.";
+        Eğer kullanıcı senden bir tablo/Excel oluşturmanı isterse, doğrudan oluşturmak yerine önce açıklama (explanation) kısmında kullanıcıya interaktif sorular sor (örn: 'Hangi sütunlar olsun?', 'Satırlarda hangi veriler yer alsın?', 'Filtre uygulamak ister misiniz?'). \
+        Eğer kullanıcı sorularını cevapladıysa ve tüm detaylar netleştiyse, verileri toparlayıp aşağıdaki formata uygun şekilde yanıtla: \
+        Yanıtını SADECE şu JSON formatında ver (başka hiçbir şey yazma, markdown veya kod bloğu kullanma):\
+        {\
+          \"explanation\": \"Markdown formatında detaylı cevap veya sohbet mesajı\", \
+          \"matched_indices\": [1, 5, 12], \
+          \"excel_data\": { \
+            \"sheet_name\": \"Excel Sayfa Adı\", \
+            \"headers\": [\"Sütun1\", \"Sütun2\", ...], \
+            \"rows\": [[\"Satır1_Hücre1\", \"Satır1_Hücre2\", ...], [\"Satır2_Hücre1\", ...]] \
+          } \
+        }\
+        Eğer henüz Excel oluşturmak için detaylar net değilse veya normal analiz yapıyorsan excel_data alanını null döndür.";
 
     let user_prompt = format!(
-        "Faturalar ({} adet):\n\n{}\n\nKullanıcı sorusu: {}",
+        "Faturalar ({} adet):\n\n{}\n\nGeçmiş Sohbet:\n{}\nLütfen en son kullanıcı sorusunu yanıtla.",
         invoices.len(),
         all_text,
-        query
+        conversation_text
     );
 
     let content = match provider.name.as_str() {
@@ -841,6 +859,12 @@ async fn deep_analyze(
 
     let explanation = parsed["explanation"].as_str().unwrap_or("").to_string();
 
+    let excel_data: Option<ExcelData> = if parsed.get("excel_data").is_some() && !parsed["excel_data"].is_null() {
+        serde_json::from_value(parsed["excel_data"].clone()).ok()
+    } else {
+        None
+    };
+
     // matched_indices → invoice ID'lerine dönüştür (1-based → 0-based)
     let matched_ids: Vec<String> = parsed["matched_indices"]
         .as_array()
@@ -855,7 +879,37 @@ async fn deep_analyze(
 
     log::info!("deep_analyze - Resulting matched_ids (count {}): {:?}", matched_ids.len(), matched_ids);
 
-    Ok(DeepAnalyzeResponse { explanation, matched_ids })
+    Ok(DeepAnalyzeResponse { explanation, matched_ids, excel_data })
+}
+
+#[tauri::command]
+async fn save_excel_file(
+    path: String,
+    excel_data: ExcelData,
+) -> Result<String, String> {
+    use rust_xlsxwriter::*;
+    let mut workbook = Workbook::new();
+    let worksheet = workbook.add_worksheet();
+    let _ = worksheet.set_name(&excel_data.sheet_name);
+    
+    // Write headers
+    for (col_idx, header) in excel_data.headers.iter().enumerate() {
+        worksheet.write(0, col_idx as u16, header)
+            .map_err(|e| format!("Excel başlık yazma hatası: {}", e))?;
+    }
+    
+    // Write rows
+    for (row_idx, row) in excel_data.rows.iter().enumerate() {
+        for (col_idx, cell) in row.iter().enumerate() {
+            worksheet.write((row_idx + 1) as u32, col_idx as u16, cell)
+                .map_err(|e| format!("Excel hücre yazma hatası: {}", e))?;
+        }
+    }
+    
+    workbook.save(&path)
+        .map_err(|e| format!("Excel kaydetme hatası: {}", e))?;
+        
+    Ok(path)
 }
 
 #[tauri::command]
@@ -892,7 +946,6 @@ pub fn run() {
                 model1: Mutex::new(cfg.model1),
                 model2: Mutex::new(cfg.model2),
                 parse_cache: Mutex::new(load_parse_cache()),
-                models_dir: Mutex::new(get_app_dir().join("models").to_string_lossy().to_string()),
             });
 
             let app_handle = app.handle().clone();
@@ -929,6 +982,7 @@ pub fn run() {
             is_model_ready,
             sync_cache_to_memory,
             deep_analyze,
+            save_excel_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

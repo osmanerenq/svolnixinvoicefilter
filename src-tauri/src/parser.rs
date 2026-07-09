@@ -351,13 +351,28 @@ pub fn parse_pdf(path: &str) -> Result<Vec<Invoice>, String> {
             la.split_whitespace().any(|w| w == "as" || w == "ltd" || w == "sti" || w == "sirket")
         };
 
+        let is_just_suffix = |l: &str| -> bool {
+            let la = to_ascii(l).replace('.', "").replace(' ', "").to_lowercase();
+            la == "sti" || la == "as" || la == "ltd" || la == "ltdsti" || la == "sirketi" || la == "anonim" || la == "limited"
+        };
+
         let mut start = line_idx;
-        while start > 0 && is_part_of_company(lines[start - 1]) && !has_company_suffix(lines[start - 1]) {
+        while start > 0 && is_part_of_company(lines[start - 1]) {
+            let prev_has_suffix = has_company_suffix(lines[start - 1]);
+            let current_is_just_suffix = is_just_suffix(lines[start]);
+            if prev_has_suffix && !current_is_just_suffix {
+                break;
+            }
             start -= 1;
         }
         
         let mut end = line_idx;
-        while end + 1 < lines.len() && is_part_of_company(lines[end + 1]) && !has_company_suffix(lines[end]) {
+        while end + 1 < lines.len() && is_part_of_company(lines[end + 1]) {
+            let current_has_suffix = has_company_suffix(lines[end]);
+            let next_is_just_suffix = is_just_suffix(lines[end + 1]);
+            if current_has_suffix && !next_is_just_suffix {
+                break;
+            }
             end += 1;
         }
         
@@ -676,4 +691,41 @@ pub fn parse_excel(path: &str) -> Result<Vec<Invoice>, String> {
 
     info!("Excel'den {} fatura okundu: {}", invoices.len(), path);
     Ok(invoices)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn test_new_extraction() {
+        let dir = "C:/Users/osman/Downloads/2026 FATURALAR";
+        let paths = fs::read_dir(dir).expect("Cannot open 2026 FATURALAR dir");
+        let mut count = 0;
+        for entry in paths {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|s| s.to_str()) == Some("pdf") {
+                let path_str = path.to_str().unwrap();
+                let filename = path.file_name().unwrap().to_str().unwrap();
+                let is_fms = filename.contains("A903CDBA-1F78-4ED2-AB0B-84770C539CDE");
+                let parsed = parse_pdf(path_str).unwrap();
+                assert_eq!(parsed.len(), 1);
+                let inv = &parsed[0];
+                if count < 10 || is_fms {
+                    println!("==================================================");
+                    println!("FILE: {}", filename);
+                    println!("Issuer: {}", inv.issuer);
+                    println!("Recipient: {}", inv.recipient);
+                    println!("Invoice No: {}", inv.invoice_number);
+                    println!("Date: {}", inv.date);
+                    println!("Amount: {}", inv.amount);
+                    println!("Tax Number: {}", inv.tax_number);
+                    if !is_fms {
+                        count += 1;
+                    }
+                }
+            }
+        }
+    }
 }

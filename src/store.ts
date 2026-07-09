@@ -25,7 +25,7 @@ interface AppStore {
   modelLoading: boolean;
   modelLoadingMessage: string;
   aiChat: { query: string; response: string; loading: boolean };
-  deepAnalysisChat: { query: string; response: string; loading: boolean; matchedIds: string[] };
+  deepAnalysisChat: { messages: ChatMessage[]; loading: boolean; matchedIds: string[]; excelData: ExcelData | null };
   providerConfigs: Record<string, AiProviderConfig>;
   activeProvider: string;
   availableModels: string[];
@@ -43,6 +43,7 @@ interface AppStore {
   fixInvoiceWithAi: (id: string) => Promise<void>;
   aiFilter: (query: string) => Promise<void>;
   deepAnalyze: (query: string, model: string) => Promise<void>;
+  clearDeepAnalysis: () => void;
   clearDeepAnalysisFilter: () => void;
   aiFilterAndGroup: (query: string, model: string) => Promise<void>;
   organizeFolders: (groupBy: string, outputDir: string, selectedIds?: string[], copyOnly?: boolean) => Promise<number>;
@@ -89,7 +90,7 @@ export const useStore = create<AppStore>((set, get) => ({
   modelLoading: true,
   modelLoadingMessage: 'AI Motoru Başlatılıyor...',
   aiChat: { query: '', response: '', loading: false },
-  deepAnalysisChat: { query: '', response: '', loading: false, matchedIds: [] },
+  deepAnalysisChat: { messages: [], loading: false, matchedIds: [], excelData: null },
   providerConfigs: {},
   activeProvider: 'deepseek',
   availableModels: [],
@@ -295,28 +296,47 @@ export const useStore = create<AppStore>((set, get) => ({
   },
 
   deepAnalyze: async (query, model) => {
-    set((s) => ({ deepAnalysisChat: { ...s.deepAnalysisChat, query, loading: true } }));
+    const newMessages = [...get().deepAnalysisChat.messages, { role: 'user', content: query } as ChatMessage];
+    set((s) => ({
+      deepAnalysisChat: {
+        ...s.deepAnalysisChat,
+        messages: newMessages,
+        loading: true,
+      }
+    }));
     try {
-      const resp = await invoke<{ explanation: string; matched_ids: string[] }>('deep_analyze', { query, model });
-      console.log("deepAnalyze response:", resp);
+      const history = get().deepAnalysisChat.messages.slice(0, -1);
+      const resp = await invoke<DeepAnalyzeResponse>('deep_analyze', { query, history, model });
       set((s) => {
-        console.log("Zustand invoices count:", s.invoices.length);
-        if (s.invoices.length > 0) {
-          console.log("Sample invoice ID from store:", s.invoices[0].id);
-          console.log("Sample matched_id from response:", resp.matched_ids[0]);
-        }
         const filtered = resp.matched_ids.length > 0
           ? s.invoices.filter((inv) => resp.matched_ids.includes(inv.id))
           : s.filtered;
-        console.log("Filtered count after deepAnalyze:", filtered.length);
         return {
-          deepAnalysisChat: { query, response: resp.explanation, loading: false, matchedIds: resp.matched_ids },
+          deepAnalysisChat: {
+            messages: [...s.deepAnalysisChat.messages, { role: 'assistant', content: resp.explanation } as ChatMessage],
+            loading: false,
+            matchedIds: resp.matched_ids,
+            excelData: resp.excel_data,
+          },
           filtered,
         };
       });
     } catch (e: any) {
-      set((s) => ({ deepAnalysisChat: { ...s.deepAnalysisChat, response: String(e), loading: false } }));
+      set((s) => ({
+        deepAnalysisChat: {
+          ...s.deepAnalysisChat,
+          messages: [...s.deepAnalysisChat.messages, { role: 'assistant', content: `Hata: ${String(e)}` } as ChatMessage],
+          loading: false,
+        }
+      }));
     }
+  },
+
+  clearDeepAnalysis: () => {
+    set({
+      deepAnalysisChat: { messages: [], loading: false, matchedIds: [], excelData: null }
+    });
+    get().applyFilter();
   },
 
   clearDeepAnalysisFilter: () => {

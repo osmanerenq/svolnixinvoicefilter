@@ -62,3 +62,20 @@ export interface AiGroupedResponse {
   groups: GroupedInvoices[];
   explanation: string;
 }
+
+export interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export interface ExcelData {
+  sheet_name: string;
+  headers: string[];
+  rows: string[][];
+}
+
+export interface DeepAnalyzeResponse {
+  explanation: string;
+  matched_ids: string[];
+  excel_data: ExcelData | null;
+}

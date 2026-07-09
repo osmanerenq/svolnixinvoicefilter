@@ -25,6 +25,7 @@ tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 calamine = "0.26"
+rust_xlsxwriter = "0.64"
 regex = "1.10"
 pdf-extract = "0.9"
 reqwest = { version = "0.12", features = ["json", "blocking"] }

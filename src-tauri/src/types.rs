@@ -70,8 +70,22 @@ pub struct AiGroupedResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub role: String, // "user" | "assistant"
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExcelData {
+    pub sheet_name: String,
+    pub headers: Vec<String>,
+    pub rows: Vec<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeepAnalyzeResponse {
     pub explanation: String,
     /// AI'nın ilgili bulduğu fatura ID'leri — frontend bunları grid filtrelemesi için kullanır
     pub matched_ids: Vec<String>,
+    pub excel_data: Option<ExcelData>,
 }
