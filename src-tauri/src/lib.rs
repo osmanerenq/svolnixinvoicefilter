@@ -813,7 +813,11 @@ async fn deep_analyze(
         Eğer kullanıcının talebi netleştiyse veya zaten en baştan beri net ise, 'finalized' değerini true yap, 'questions' alanını null/boş yap ve analizini tamamla. \
         \
         EXCEL DOSYASI OLUŞTURMA BİLGİSİ (ÇOK ÖNEMLİ): \
-        - Kullanıcı Excel dosyası istediğinde veya Excel'e aktarılacak bir tablo talep ettiğinde, 'excel_data' nesnesini mutlaka uygun başlık ve satırlarla doldur. \
+        - Kullanıcı herhangi bir şekilde 'Excel oluştur', 'Excel'e aktar', 'tablo yap', 'rapor çıkart' gibi bir talepte bulunduğunda, her zaman ürün/hizmet kalemlerini de içeren detaylı bir Excel raporu oluşturmayı VARSAYILAN KABUL ET. \
+        - Ayrıntılı ürün kalemlerine ulaşmak için Phase 1'de (ilk aşama) MUTLAKA 'needs_raw_text' değerini true VE 'finalized' değerini true yaparak Phase 2'ye (ikinci aşama) geç. Kullanıcıya sorular sorarak süreci uzatma, doğrudan detaylı veriyi çek. \
+        - Kullanıcı Excel sütunlarını belirtmediyse, ürün detaylı Excel için şu varsayılan sütun başlıklarını (headers) kullan: ['Fatura Tarihi', 'Fatura No', 'Düzenleyen (Satıcı)', 'Alıcı (Müşteri)', 'Ürün/Hizmet Adı', 'Miktar', 'Birim Fiyat', 'KDV Oranı', 'KDV Tutarı', 'Toplam Tutar']. \
+        - İkinci aşamada (Phase 2) faturaların detaylı metinleri (raw_text) sana geldiğinde, faturadaki her bir kalemi/ürünü/hizmeti tek tek satır satır excel_data.rows içine ekle. \
+        - Kesinlikle 'işlem çok karmaşık', 'manuel yapamam', 'çok uzun sürer' veya 'tüm ürünleri çıkarmam mümkün değil' diyerek işlemi reddetme veya yarıda bırakma. Her faturanın içindeki tüm ürün/hizmet kalemlerini eksiksiz şekilde excel_data.rows dizisine satır satır eklemek senin temel görevindir. \
         - 'excel_data' nesnesini doldurduğunda, sistem bu verileri alıp arka planda otomatik olarak gerçek bir Excel (.xlsx) dosyası oluşturur ve arayüzde indirme butonu çıkartır. \
         - Kullanıcıya 'fiziksel dosya oluşturamıyorum' veya 'sadece JSON döndürebiliyorum' gibi cümleler KESİNLİKLE kurma. \
         - Bunun yerine, excel_data'yı doldurduğunu ve kullanıcının bu Excel dosyasını arayüzdeki 'Excel Dosyasını İndir' butonuna tıklayarak indirebileceğini 'explanation' alanında nazikçe belirt. \
@@ -1006,14 +1010,22 @@ async fn deep_analyze(
         })
         .collect();
 
+    let questions: Option<Vec<MultipleChoiceQuestion>> = serde_json::from_value(parsed_p2["questions"].clone()).ok();
+    let mut is_finalized = parsed_p2["finalized"].as_bool().unwrap_or(true);
+    if let Some(ref q) = questions {
+        if !q.is_empty() {
+            is_finalized = false;
+        }
+    }
+
     log::info!("deep_analyze - Phase 2 matched_ids: {:?}", matched_ids);
 
     Ok(DeepAnalyzeResponse {
         explanation,
         matched_ids,
         excel_data,
-        questions: None,
-        finalized: true,
+        questions,
+        finalized: is_finalized,
     })
 }
 
