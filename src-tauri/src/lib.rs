@@ -689,7 +689,7 @@ async fn fix_invoice_with_ai(state: tauri::State<'_, AppState>, id: String) -> R
 
         let clean = crate::ai::clean_json(&content);
 
-        let parsed = serde_json::from_str::<serde_json::Value>(clean)
+        let parsed = serde_json::from_str::<serde_json::Value>(&clean)
             .map_err(|e| format!("JSON ayrıştırma hatası: {}", e))?;
 
         let ai_issuer = parsed["issuer"].as_str().unwrap_or_default().trim().to_string();
@@ -747,6 +747,104 @@ fn update_invoice_category(
     Ok(())
 }
 
+pub fn extract_excel_from_markdown(text: &str) -> Option<ExcelData> {
+    let lines: Vec<&str> = text.lines().map(|l| l.trim()).collect();
+    let mut table_lines: Vec<&str> = Vec::new();
+    
+    for line in lines {
+        if line.starts_with('|') || (line.contains('|') && line.ends_with('|')) {
+            table_lines.push(line);
+        } else if !table_lines.is_empty() {
+            if table_lines.len() >= 2 {
+                break;
+            } else {
+                table_lines.clear();
+            }
+        }
+    }
+    
+    if table_lines.len() < 2 {
+        return None;
+    }
+    
+    let parse_row = |line: &str| -> Vec<String> {
+        let trimmed = line.trim();
+        let parts: Vec<&str> = trimmed.split('|').collect();
+        let mut cells = Vec::new();
+        let start = if parts.first().map_or(false, |s| s.trim().is_empty()) { 1 } else { 0 };
+        let end = if parts.last().map_or(false, |s| s.trim().is_empty()) && parts.len() > start { parts.len() - 1 } else { parts.len() };
+        for i in start..end {
+            cells.push(parts[i].trim().to_string());
+        }
+        cells
+    };
+    
+    let headers = parse_row(table_lines[0]);
+    if headers.is_empty() {
+        return None;
+    }
+    
+    let mut rows = Vec::new();
+    for line in &table_lines[1..] {
+        let cells = parse_row(line);
+        if cells.is_empty() {
+            continue;
+        }
+        if cells.iter().all(|c| c.chars().all(|ch| ch == '-' || ch == ':' || ch == ' ')) {
+            continue;
+        }
+        rows.push(cells);
+    }
+    
+    if rows.is_empty() {
+        return None;
+    }
+    
+    Some(ExcelData {
+        sheet_name: "Demirbaş & Fatura Raporu".to_string(),
+        headers,
+        rows,
+    })
+}
+
+fn parse_llm_json_or_fallback(raw: &str) -> serde_json::Value {
+    let clean = crate::ai::clean_json(raw);
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&clean) {
+        if v.is_object() {
+            return v;
+        }
+    }
+    
+    let mut val = serde_json::json!({
+        "explanation": raw.trim(),
+        "matched_indices": [],
+        "excel_data": serde_json::Value::Null,
+        "questions": serde_json::Value::Null,
+        "needs_raw_text": false,
+        "finalized": true,
+    });
+
+    if let Some(excel) = extract_excel_from_markdown(raw) {
+        if let Ok(excel_val) = serde_json::to_value(excel) {
+            val["excel_data"] = excel_val;
+        }
+    }
+
+    val
+}
+
+fn clean_explanation_string(expl: &str) -> String {
+    let trimmed = expl.trim();
+    if trimmed.starts_with('{') && trimmed.contains("\"explanation\"") {
+        if let Ok(inner) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            if let Some(inner_expl) = inner["explanation"].as_str() {
+                return inner_expl.to_string();
+            }
+        }
+    }
+    trimmed.to_string()
+}
+
 #[tauri::command]
 async fn deep_analyze(
     state: tauri::State<'_, AppState>,
@@ -765,7 +863,6 @@ async fn deep_analyze(
         return Err(format!("{} API anahtari ayarlanmamis.", provider.name));
     }
 
-    // Filtrelenmiş faturaların tamamını al (Üst bilgiler hafif olduğundan sınır koymuyoruz)
     let invoices: Vec<Invoice> = {
         let all = state.invoices.lock().unwrap();
         all.iter()
@@ -789,7 +886,6 @@ async fn deep_analyze(
     }
     conversation_text.push_str(&format!("Kullanıcı: {}\n", query));
 
-    // AŞAMA 1 (SORU SORMA / NETLEŞTİRME): Faturaların sadece üst bilgi özetlerini göndererek büyük token tasarrufu sağlıyoruz!
     let metadata_summaries: Vec<String> = invoices
         .iter()
         .enumerate()
@@ -807,54 +903,35 @@ async fn deep_analyze(
         .collect();
     let metadata_text = metadata_summaries.join("\n");
 
-    let system_prompt = "Sen bir fatura analiz uzmanısın. Kullanıcı ile interaktif sohbet ederek faturaları analiz et ve gerekirse Excel dosyası oluştur. \
-        Kullanıcıyla konuşurken, eğer Excel oluşturma, özel raporlama veya filtreleme parametreleri tam net değilse (örn. hangi sütunlar olsun, satırları neye göre filtreleyelim, vb.), 'finalized' değerini false yap ve 'questions' listesinde kullanıcıya yönelteceğin en fazla 3 adet çoktan seçmeli soru oluştur. \
-        Çoktan seçmeli soruların seçenekleri net ve kısa olsun, ayrıca kullanıcının kendi cevabını yazabilmesi için 'allow_custom' değerini true yapabilirsin. \
-        Eğer kullanıcının talebi netleştiyse veya zaten en baştan beri net ise, 'finalized' değerini true yap, 'questions' alanını null/boş yap ve analizini tamamla. \
-        \
-        EXCEL DOSYASI OLUŞTURMA BİLGİSİ (ÇOK ÖNEMLİ): \
-        - Kullanıcı herhangi bir şekilde 'Excel oluştur', 'Excel'e aktar', 'tablo yap', 'rapor çıkart' gibi bir talepte bulunduğunda, her zaman ürün/hizmet kalemlerini de içeren detaylı bir Excel raporu oluşturmayı VARSAYILAN KABUL ET. \
-        - Ayrıntılı ürün kalemlerine ulaşmak için Phase 1'de (ilk aşama) MUTLAKA 'needs_raw_text' değerini true VE 'finalized' değerini true yaparak Phase 2'ye (ikinci aşama) geç. Kullanıcıya sorular sorarak süreci uzatma, doğrudan detaylı veriyi çek. \
-        - Kullanıcı Excel sütunlarını belirtmediyse, ürün detaylı Excel için şu varsayılan sütun başlıklarını (headers) kullan: ['Fatura Tarihi', 'Fatura No', 'Düzenleyen (Satıcı)', 'Alıcı (Müşteri)', 'Ürün/Hizmet Adı', 'Miktar', 'Birim Fiyat', 'KDV Oranı', 'KDV Tutarı', 'Toplam Tutar']. \
-        - İkinci aşamada (Phase 2) faturaların detaylı metinleri (raw_text) sana geldiğinde, faturadaki her bir kalemi/ürünü/hizmeti tek tek satır satır excel_data.rows içine ekle. \
-        - Kesinlikle 'işlem çok karmaşık', 'manuel yapamam', 'çok uzun sürer' veya 'tüm ürünleri çıkarmam mümkün değil' diyerek işlemi reddetme veya yarıda bırakma. Her faturanın içindeki tüm ürün/hizmet kalemlerini eksiksiz şekilde excel_data.rows dizisine satır satır eklemek senin temel görevindir. \
-        - 'excel_data' nesnesini doldurduğunda, sistem bu verileri alıp arka planda otomatik olarak gerçek bir Excel (.xlsx) dosyası oluşturur ve arayüzde indirme butonu çıkartır. \
-        - Kullanıcıya 'fiziksel dosya oluşturamıyorum' veya 'sadece JSON döndürebiliyorum' gibi cümleler KESİNLİKLE kurma. \
-        - Bunun yerine, excel_data'yı doldurduğunu ve kullanıcının bu Excel dosyasını arayüzdeki 'Excel Dosyasını İndir' butonuna tıklayarak indirebileceğini 'explanation' alanında nazikçe belirt. \
-        \
-        DETAYLI İÇERİK (RAW TEXT) ÇEKME MEKANİZMASI (ÇOK ÖNEMLİ): \
-        - Sana ilk aşamada faturaların detaylı içeriği (ürünler, kalemler vb.) gönderilmez, sadece dosya adı, düzenleyen, alıcı, tutar ve tarih gibi üst bilgileri gönderilir. \
-        - Kullanıcının sorusunu veya talebini yerine getirmek için faturaların detaylı içeriğine (ürün adları, kalem detayları, KDV oranları vb.) İHTİYACIN VARSA, JSON yanıtındaki 'needs_raw_text' alanını true VE 'finalized' alanını true yapmak ZORUNDASIN. \
-        - Bunu yaptığında sistem seni ikinci aşamada (Phase 2) otomatik olarak bu faturaların detaylı içerikleriyle birlikte tekrar çağıracaktır. \
-        - Kullanıcıdan detaylı metinleri elle yazıp göndermesini ASLA isteme. Sistem bunu otomatik yapacaktır. Tek yapman gereken 'finalized: true' ve 'needs_raw_text: true' yapmaktır. \
-        - Eğer detaylı ham metne (raw text) ihtiyacın yoksa (örn. sadece dosya adı, alıcı, düzenleyen, tutar, tarih gibi üst bilgilerle cevaplanabilecek sorular), 'finalized' değerini true ve 'needs_raw_text' değerini false yap. \
-        \
-        FİLTRELEME VE EŞLEŞTİRME KURALLARI: \
-        - Kullanıcının filtreleme isteklerinde Düzenleyen (Issuer) ve Alıcı (Recipient) alanlarını birbirinden kesin olarak ayırt et. \
-        - Örneğin: 'Alıcısı (veya alıcı faturalarında) ASC Enerji olanlar' dendiğinde, SADECE 'Alıcı' alanında ASC Enerji yazan faturaları eşleştir. Düzenleyeni (Issuer) ASC Enerji olup alıcısı Enerjisa olan faturaları kesinlikle eşleştirme! \
-        - Örneğin: 'Enerjisa faturaları' dendiğinde, alıcısı veya düzenleyeni Enerjisa olan faturaları eşleştir. \
-        - matched_indices listesine sadece ve sadece sorguyla birebir eşleşen faturaların 1-tabanlı indeks numaralarını (örn. [1, 3, 5]) ekle. Tüm faturaları körü körüne eşleştirme! \
-        - matched_indices listesine eklediğin fatura indekslerinin doğruluğundan emin ol. \
-        \
-        Yanıtını SADECE şu JSON formatında ver (başka hiçbir açıklama, kod bloğu veya markdown dışı karakter yazma):\
-        {\
-          \"explanation\": \"Markdown formatında sohbet mesajınız veya özet rapor\", \
-          \"matched_indices\": [1, 5, 12], \
-          \"excel_data\": { \
-            \"sheet_name\": \"Excel Sayfa Adı\", \
-            \"headers\": [\"Sütun1\", \"Sütun2\", ...], \
-            \"rows\": [[\"Satır1_Hücre1\", \"Satır1_Hücre2\", ...], [\"Satır2_Hücre1\", ...]] \
-          }, \
-          \"questions\": [ \
-            { \
-              \"id\": \"soru_id_1\", \
-              \"text\": \"Soru metni?\", \
-              \"options\": [\"Seçenek A\", \"Seçenek B\", \"Diğer (Farklı bir şey belirtin)\"], \
-              \"allow_custom\": true \
-            } \
-          ], \
-          \"needs_raw_text\": true, \
-          \"finalized\": false \
+    let system_prompt = "Sen bir uzman Muhasebe, Veri Analizi ve Fatura Yapay Zekasısın (Nixie AI).\n\
+        Kullanıcı fatura analizi, demirbaş tespiti, listeleme veya Excel raporu istediğinde detaylı inceleme yapar ve yanıt verirsin.\n\n\
+        EXCEL VE RAPORLAMA KURALLARI (ÇOK ÖNEMLİ):\n\
+        1. Kullanıcı Excel, demirbaş listesi, tablo, rapor veya süzme/filtreleme istediğinde, 'excel_data' objesini MUTLAKA eksiksiz olarak doldurmalısın.\n\
+        2. 'excel_data' objesi şu yapıda olmalıdır:\n\
+           {\n\
+             \"sheet_name\": \"Excel Sayfa Adı (örn: Demirbaş Listesi)\",\n\
+             \"headers\": [\"Dosya No\", \"Fatura No\", \"Fatura Tarihi\", \"Düzenleyen\", \"Ürün/Hizmet Açıklaması\", \"Miktar\", \"Birim Fiyat (TL)\", \"KDV Oranı\", \"KDV Tutarı (TL)\", \"Toplam Tutar (TL)\", \"Demirbaş Kategorisi\", \"Açıklama\"],\n\
+             \"rows\": [ [\"1\", \"FT-123\", \"20.07.2026\", \"ABC A.Ş.\", \"Laptop\", \"1\", \"15000.00\", \"%20\", \"3000.00\", \"18000.00\", \"Bilgi İşlem\", \"Demirbaş kriterlerine uyar\"] ]\n\
+           }\n\
+        3. Kullanıcıya 'Excel dosyanız hazırlandı' veya 'Aşağıdaki butondan indirebilirsiniz' dediğin HERYERDE, 'excel_data' objesini ve 'rows' dizisini KESİNLİKLE doldurmuş olmalısın. 'excel_data' olmadan indirme butonu çıkmaz.\n\
+        4. Eğer kullanıcı Excel sütunlarını kendisi belirttiyse o sütunları kullan, belirtmediyse yukarıdaki standart sütunları veya konuyla ilgili sütunları kullan.\n\
+        5. Faturadaki tüm ürün/hizmet kalemlerini eksiksiz satır satır excel_data.rows içine yaz.\n\n\
+        DETAYLI İÇERİK (RAW TEXT) AŞAMALARI:\n\
+        - İlk aşamada sana fatura üst bilgileri gönderilir. Eğer faturanın detaylı kalemlerine/ürünlerine/metinlerine ihtiyacın varsa 'finalized': true VE 'needs_raw_text': true yap.\n\
+        - İkinci aşamada detaylı metinler geldiğinde 'excel_data' objesini tam doldur ve 'finalized': true yap.\n\n\
+        YANIT FORMATI:\n\
+        Yanıtını SADECE geçerli bir JSON objesi olarak ver. Markdown kod bloğu (```json) KULLANMA. Ham JSON döndür:\n\
+        {\n\
+          \"explanation\": \"Kullanıcıya gösterilecek Markdown formatında Türkçe açıklama veya özet.\",\n\
+          \"matched_indices\": [1, 2],\n\
+          \"excel_data\": {\n\
+            \"sheet_name\": \"...\",\n\
+            \"headers\": [...],\n\
+            \"rows\": [...]\n\
+          },\n\
+          \"questions\": null,\n\
+          \"needs_raw_text\": true,\n\
+          \"finalized\": true\n\
         }";
 
     let user_prompt_phase1 = format!(
@@ -867,31 +944,33 @@ async fn deep_analyze(
     let content_phase1 = match provider.name.as_str() {
         "gemini" => ai::chat_completion_gemini(&provider.api_key, &model, system_prompt, &user_prompt_phase1).await?,
         "claude" => ai::chat_completion_claude(&provider.api_key, &model, system_prompt, &user_prompt_phase1).await?,
-        _ => ai::chat_completion_openai_compat(&provider, &model, system_prompt, &user_prompt_phase1, false).await?,
+        _ => ai::chat_completion_openai_compat(&provider, &model, system_prompt, &user_prompt_phase1, true).await?,
     };
 
-    let clean_p1 = crate::ai::clean_json(&content_phase1);
-    let parsed_p1: serde_json::Value = serde_json::from_str(clean_p1)
-        .map_err(|e| format!("AI yanıtı parse hatası (Phase 1): {} | Ham: {}", e, clean_p1))?;
+    let parsed_p1 = parse_llm_json_or_fallback(&content_phase1);
 
     let questions: Option<Vec<MultipleChoiceQuestion>> = serde_json::from_value(parsed_p1["questions"].clone()).ok();
-    let mut is_finalized = parsed_p1["finalized"].as_bool().unwrap_or(false);
-    if let Some(ref q) = questions {
-        if !q.is_empty() {
-            is_finalized = false;
-        }
-    }
+    let has_questions = questions.as_ref().map_or(false, |q| !q.is_empty());
     let needs_raw_text = parsed_p1["needs_raw_text"].as_bool().unwrap_or(true);
 
-    if !is_finalized || !needs_raw_text {
-        // AŞAMA 1 TAMAM: Soruları veya ara/nihai sohbet yanıtını doğrudan dön (raw metin gerekmiyor veya henüz kesinleşmedi)
-        let explanation = parsed_p1["explanation"].as_str().unwrap_or("").to_string();
+    // YENİ VE KESİN AKIŞ:
+    // Faz 1'den sadece ve sadece AI kullanıcıya interaktif çoktan seçmeli sorular (questions) sorduysa ERKEN çık!
+    // Eğer soru sorulmamışsa, HİÇ DURMADAN AŞAMA 2'YE GEÇ ve TÜM RAW TEXT'LERİ OTOMATİK YÜKLE!
+    if has_questions && !needs_raw_text {
+        let raw_expl = parsed_p1["explanation"].as_str().unwrap_or("");
+        let explanation = clean_explanation_string(raw_expl);
         
-        let excel_data: Option<ExcelData> = if parsed_p1.get("excel_data").is_some() && !parsed_p1["excel_data"].is_null() {
+        let mut excel_data: Option<ExcelData> = if parsed_p1.get("excel_data").is_some() && !parsed_p1["excel_data"].is_null() {
             serde_json::from_value(parsed_p1["excel_data"].clone()).ok()
         } else {
             None
         };
+
+        if excel_data.as_ref().map_or(true, |e| e.rows.is_empty()) {
+            if let Some(fallback_excel) = extract_excel_from_markdown(&explanation) {
+                excel_data = Some(fallback_excel);
+            }
+        }
 
         let matched_ids: Vec<String> = parsed_p1["matched_indices"]
             .as_array()
@@ -911,12 +990,11 @@ async fn deep_analyze(
             matched_ids,
             excel_data,
             questions,
-            finalized: is_finalized,
+            finalized: false,
         });
     }
 
-    // AŞAMA 2 (İŞLEM YAPILIYOR / KESİNLEŞTİ + RAW TEXT GEREKLİ):
-    // matched_indices belirlenmişse, sadece o faturaların raw_text'lerini yükle
+    // AŞAMA 2 (İŞLEM YAPILIYOR / RAW TEXT OTOMATİK GÖNDERİLİYOR):
     let matched_indices: Vec<usize> = parsed_p1["matched_indices"]
         .as_array()
         .unwrap_or(&vec![])
@@ -925,13 +1003,12 @@ async fn deep_analyze(
         .map(|idx| (idx as usize).saturating_sub(1))
         .collect();
 
-    let target_invoices = if !matched_indices.is_empty() {
-        matched_indices.iter().filter_map(|&idx| invoices.get(idx)).cloned().collect::<Vec<Invoice>>()
+    let target_invoices: Vec<Invoice> = if !matched_indices.is_empty() {
+        matched_indices.iter().filter_map(|&idx| invoices.get(idx)).cloned().collect()
     } else {
-        invoices.clone()
+        invoices.iter().take(300).cloned().collect()
     };
 
-    // Eğer işlem yapılması gereken fatura sayısı 300'ü geçiyorsa, Yapay Zeka isteği yapmadan doğrudan uyarı dön
     if target_invoices.len() > 300 {
         return Ok(DeepAnalyzeResponse {
             explanation: format!(
@@ -984,20 +1061,25 @@ async fn deep_analyze(
     let content_phase2 = match provider.name.as_str() {
         "gemini" => ai::chat_completion_gemini(&provider.api_key, &model, system_prompt, &user_prompt_phase2).await?,
         "claude" => ai::chat_completion_claude(&provider.api_key, &model, system_prompt, &user_prompt_phase2).await?,
-        _ => ai::chat_completion_openai_compat(&provider, &model, system_prompt, &user_prompt_phase2, false).await?,
+        _ => ai::chat_completion_openai_compat(&provider, &model, system_prompt, &user_prompt_phase2, true).await?,
     };
 
-    let clean_p2 = crate::ai::clean_json(&content_phase2);
-    let parsed_p2: serde_json::Value = serde_json::from_str(clean_p2)
-        .map_err(|e| format!("AI yanıtı parse hatası (Phase 2): {} | Ham: {}", e, clean_p2))?;
+    let parsed_p2 = parse_llm_json_or_fallback(&content_phase2);
 
-    let explanation = parsed_p2["explanation"].as_str().unwrap_or("").to_string();
+    let raw_expl = parsed_p2["explanation"].as_str().unwrap_or("");
+    let explanation = clean_explanation_string(raw_expl);
 
-    let excel_data: Option<ExcelData> = if parsed_p2.get("excel_data").is_some() && !parsed_p2["excel_data"].is_null() {
+    let mut excel_data: Option<ExcelData> = if parsed_p2.get("excel_data").is_some() && !parsed_p2["excel_data"].is_null() {
         serde_json::from_value(parsed_p2["excel_data"].clone()).ok()
     } else {
         None
     };
+
+    if excel_data.as_ref().map_or(true, |e| e.rows.is_empty()) {
+        if let Some(fallback_excel) = extract_excel_from_markdown(&explanation) {
+            excel_data = Some(fallback_excel);
+        }
+    }
 
     let matched_ids: Vec<String> = parsed_p2["matched_indices"]
         .as_array()

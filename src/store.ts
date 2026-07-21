@@ -319,7 +319,7 @@ export const useStore = create<AppStore>((set, get) => ({
             messages: [...s.deepAnalysisChat.messages, { role: 'assistant', content: resp.explanation } as ChatMessage],
             loading: false,
             matchedIds: resp.finalized ? resp.matched_ids : [],
-            excelData: resp.finalized ? resp.excel_data : null,
+            excelData: resp.excel_data || s.deepAnalysisChat.excelData,
             questions: resp.questions,
             finalized: resp.finalized,
           },
@@ -330,7 +330,7 @@ export const useStore = create<AppStore>((set, get) => ({
       set((s) => ({
         deepAnalysisChat: {
           ...s.deepAnalysisChat,
-          messages: [...s.deepAnalysisChat.messages, { role: 'assistant', content: `Hata: ${String(e)}` } as ChatMessage],
+          messages: [...s.deepAnalysisChat.messages, { role: 'assistant', content: `Bir hata oluştu: ${String(e)}` } as ChatMessage],
           loading: false,
         }
       }));

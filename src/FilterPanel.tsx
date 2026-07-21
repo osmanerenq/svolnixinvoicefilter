@@ -905,6 +905,63 @@ function MarkdownFormatter({ text }: { text: string }) {
   let tableHeaders: string[] = [];
   let tableRows: string[][] = [];
 
+  const renderTableElement = (keyStr: string, headers: string[], rows: string[][]) => {
+    const currentHeaders = [...headers];
+    const currentRows = [...rows];
+    return (
+      <div key={keyStr} className="my-2 border border-purple-800/40 rounded-lg overflow-hidden bg-gray-900/60 shadow-md">
+        <div className="flex items-center justify-between px-3 py-1.5 bg-purple-950/40 border-b border-purple-900/50">
+          <span className="text-xs font-semibold text-purple-200 flex items-center gap-1.5">
+            📊 Fatura / Demirbaş Tablosu ({currentRows.length} satır)
+          </span>
+          <button
+            onClick={async () => {
+              const { invoke } = await import('@tauri-apps/api/core');
+              try {
+                const savePath = await save({
+                  filters: [{ name: 'Excel Tablosu', extensions: ['xlsx'] }],
+                  defaultPath: `Demirbaş_Fatura_Raporu.xlsx`
+                });
+                if (savePath) {
+                  await invoke('save_excel_file', {
+                    path: savePath,
+                    excelData: { sheet_name: 'Fatura Raporu', headers: currentHeaders, rows: currentRows }
+                  });
+                  alert(`Excel dosyası başarıyla kaydedildi:\n${savePath}`);
+                }
+              } catch (err) {
+                alert(`Kaydetme hatası: ${err}`);
+              }
+            }}
+            className="bg-green-600 hover:bg-green-500 text-white text-[11px] font-medium px-2.5 py-1 rounded flex items-center gap-1 shadow transition-all cursor-pointer"
+          >
+            📥 Tabloyu Excel Olarak İndir (.xlsx)
+          </button>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="min-w-full text-xs text-left text-gray-300">
+            <thead className="bg-gray-800 text-amber-200 uppercase font-semibold border-b border-gray-700">
+              <tr>
+                {currentHeaders.map((h, idx) => (
+                  <th key={idx} className="px-3 py-1.5 whitespace-nowrap">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-800 bg-gray-900/40">
+              {currentRows.map((row, rIdx) => (
+                <tr key={rIdx} className="hover:bg-gray-800/20">
+                  {row.map((cell, cIdx) => (
+                    <td key={cIdx} className="px-3 py-1.5 whitespace-nowrap">{parseBoldText(cell)}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  };
+
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
 
@@ -927,28 +984,7 @@ function MarkdownFormatter({ text }: { text: string }) {
     } else {
       // If we were in a table and table ended, render the table
       if (inTable && tableHeaders.length > 0) {
-        renderedElements.push(
-          <div key={`table-${i}`} className="overflow-x-auto my-2 border border-gray-800 rounded-lg">
-            <table className="min-w-full text-xs text-left text-gray-300">
-              <thead className="bg-gray-800 text-amber-200 uppercase font-semibold border-b border-gray-700">
-                <tr>
-                  {tableHeaders.map((h, idx) => (
-                    <th key={idx} className="px-3 py-1.5">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-800 bg-gray-900/40">
-                {tableRows.map((row, rIdx) => (
-                  <tr key={rIdx} className="hover:bg-gray-800/20">
-                    {row.map((cell, cIdx) => (
-                      <td key={cIdx} className="px-3 py-1.5 whitespace-nowrap">{parseBoldText(cell)}</td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        );
+        renderedElements.push(renderTableElement(`table-${i}`, tableHeaders, tableRows));
         inTable = false;
         tableHeaders = [];
         tableRows = [];
@@ -980,28 +1016,7 @@ function MarkdownFormatter({ text }: { text: string }) {
 
   // Handle case where table is the last block
   if (inTable && tableHeaders.length > 0) {
-    renderedElements.push(
-      <div key="table-final" className="overflow-x-auto my-2 border border-gray-800 rounded-lg">
-        <table className="min-w-full text-xs text-left text-gray-300">
-          <thead className="bg-gray-800 text-amber-200 uppercase font-semibold border-b border-gray-700">
-            <tr>
-              {tableHeaders.map((h, idx) => (
-                <th key={idx} className="px-3 py-1.5">{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-800 bg-gray-900/40">
-            {tableRows.map((row, rIdx) => (
-              <tr key={rIdx} className="hover:bg-gray-800/20">
-                {row.map((cell, cIdx) => (
-                  <td key={cIdx} className="px-3 py-1.5">{parseBoldText(cell)}</td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    );
+    renderedElements.push(renderTableElement("table-final", tableHeaders, tableRows));
   }
 
   return <div className="space-y-1">{renderedElements}</div>;

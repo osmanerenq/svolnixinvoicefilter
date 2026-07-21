@@ -163,9 +163,20 @@ fn parse_openai_response(body: &serde_json::Value) -> Result<AiResponse, String>
     parse_json_response(content)
 }
 
-pub fn clean_json(raw: &str) -> &str {
-    let clean_temp = raw.trim();
+pub fn clean_json(raw: &str) -> String {
+    let mut clean_temp = raw.trim();
     
+    // Strip markdown code block wrappers if any
+    if clean_temp.starts_with("```json") {
+        clean_temp = clean_temp.strip_prefix("```json").unwrap_or(clean_temp);
+    } else if clean_temp.starts_with("```") {
+        clean_temp = clean_temp.strip_prefix("```").unwrap_or(clean_temp);
+    }
+    if clean_temp.ends_with("```") {
+        clean_temp = clean_temp.strip_suffix("```").unwrap_or(clean_temp);
+    }
+    clean_temp = clean_temp.trim();
+
     let start_brace = clean_temp.find('{');
     let start_bracket = clean_temp.find('[');
     
@@ -176,11 +187,12 @@ pub fn clean_json(raw: &str) -> &str {
         (None, None) => None,
     };
     
-    if let Some(start) = start_idx {
+    let extracted = if let Some(start) = start_idx {
         let bytes = clean_temp.as_bytes();
         let mut stack = Vec::new();
         let mut in_string = false;
         let mut escaped = false;
+        let mut end_pos = clean_temp.len();
         
         for i in start..bytes.len() {
             let c = bytes[i] as char;
@@ -204,26 +216,60 @@ pub fn clean_json(raw: &str) -> &str {
                         if expected == c {
                             stack.pop();
                             if stack.is_empty() {
-                                return &clean_temp[start..=i];
-                            }
-                        } else {
-                            stack.pop();
-                            if stack.is_empty() {
-                                return &clean_temp[start..=i];
+                                end_pos = i + 1;
+                                break;
                             }
                         }
                     }
                 }
             }
         }
+        &clean_temp[start..end_pos]
+    } else {
+        clean_temp
+    };
+
+    sanitize_json_control_chars(extracted)
+}
+
+fn sanitize_json_control_chars(input: &str) -> String {
+    let mut result = String::with_capacity(input.len() + 32);
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for c in input.chars() {
+        if in_string {
+            if escaped {
+                result.push(c);
+                escaped = false;
+            } else if c == '\\' {
+                result.push(c);
+                escaped = true;
+            } else if c == '"' {
+                result.push(c);
+                in_string = false;
+            } else if c == '\n' {
+                result.push_str("\\n");
+            } else if c == '\r' {
+                result.push_str("\\r");
+            } else if c == '\t' {
+                result.push_str("\\t");
+            } else {
+                result.push(c);
+            }
+        } else {
+            if c == '"' {
+                in_string = true;
+            }
+            result.push(c);
+        }
     }
-    
-    clean_temp
+    result
 }
 
 fn parse_json_response(raw: &str) -> Result<AiResponse, String> {
     let clean = clean_json(raw);
-    serde_json::from_str(clean)
+    serde_json::from_str(&clean)
         .map_err(|e| format!("AI yanıtı parse hatası: {} | Ham: {}", e, clean))
 }
 
@@ -355,8 +401,24 @@ pub async fn chat_completion_openai_compat(
         .header("Content-Type", "application/json")
         .json(&body)
         .send()
-        .await
-        .map_err(|e| format!("API hatası: {}", e))?;
+        .await;
+
+    let resp = match resp {
+        Ok(r) if !r.status().is_success() && response_format_json => {
+            // Retry without response_format if provider API returned HTTP error for json_object
+            body.as_object_mut().unwrap().remove("response_format");
+            client
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", provider.api_key))
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("API hatası: {}", e))?
+        }
+        Ok(r) => r,
+        Err(e) => return Err(format!("API hatası: {}", e)),
+    };
 
     let resp_body: serde_json::Value = resp.json().await.map_err(|e| format!("JSON parse: {}", e))?;
     let content = resp_body["choices"][0]["message"]["content"]
@@ -390,7 +452,10 @@ pub async fn chat_completion_gemini(
                 "parts": [{"text": user_prompt}],
                 "role": "user"
             }],
-            "generationConfig": { "temperature": 0.1 },
+            "generationConfig": {
+                "temperature": 0.1,
+                "responseMimeType": "application/json"
+            },
         }))
         .send()
         .await
